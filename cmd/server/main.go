@@ -12,6 +12,7 @@ import (
 	"github.com/joho/godotenv"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/mk6i/open-oscar-server/server/federation"
 	"github.com/mk6i/open-oscar-server/server/webapi"
 )
 
@@ -78,6 +79,13 @@ func main() {
 		g.Go(webAPI.ListenAndServe)
 	}
 
+	var fedServer *federation.Server
+	if deps.federationManager != nil {
+		fedServer = federation.NewServer(deps.cfg.FederationListener, deps.federationManager, deps.logger)
+		g.Go(fedServer.ListenAndServe)
+		g.Go(deps.federationManager.ConnectToPeersFunc(ctx))
+	}
+
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -88,6 +96,9 @@ func main() {
 		_ = toc.Shutdown(shutdownCtx)
 		if os.Getenv("ENABLE_WEBAPI") == "1" {
 			_ = webAPI.Shutdown(shutdownCtx)
+		}
+		if fedServer != nil {
+			_ = fedServer.Shutdown(shutdownCtx)
 		}
 	}
 

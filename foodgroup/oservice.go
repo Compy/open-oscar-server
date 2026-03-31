@@ -28,6 +28,15 @@ type OServiceService struct {
 	chatMessageRelayer    ChatMessageRelayer
 	profileManager        ProfileManager
 	offlineMessageManager OfflineMessageManager
+	federationPresenceMgr FederationPresenceManager // nil when federation disabled
+	feedbagManager        FeedbagManager            // used to read feedbag for federation subscriptions
+}
+
+// SetFederation configures federation presence on the OService. When set,
+// user sign-on triggers presence subscriptions for federated buddies.
+func (s *OServiceService) SetFederation(mgr FederationPresenceManager, fm FeedbagManager) {
+	s.federationPresenceMgr = mgr
+	s.feedbagManager = fm
 }
 
 // NewOServiceService creates a new instance of NewOServiceService.
@@ -681,6 +690,34 @@ func (s OServiceService) ClientOnline(ctx context.Context, service uint16, inBod
 	case wire.BOS:
 		if err := s.buddyBroadcaster.BroadcastVisibility(ctx, instance, nil, false); err != nil {
 			return fmt.Errorf("unable to send buddy arrival notification: %w", err)
+		}
+
+		// Notify federation peers that this user came online.
+		// BroadcastVisibility above only notifies local users via
+		// unicastBuddyArrived — it does not go through
+		// BuddyService.BroadcastBuddyArrived where the federation
+		// hook lives. So we must notify federation peers explicitly.
+		if s.federationPresenceMgr != nil && !instance.Session().Invisible() {
+			if err := s.federationPresenceMgr.NotifyPresence(ctx, instance.IdentScreenName(), true); err != nil {
+				s.logger.ErrorContext(ctx, "failed to send federation presence notification", "err", err)
+			}
+		}
+
+		// Subscribe to presence for federated buddies in the user's feedbag
+		if s.federationPresenceMgr != nil && s.feedbagManager != nil {
+			items, err := s.feedbagManager.Feedbag(ctx, instance.IdentScreenName())
+			if err != nil {
+				s.logger.ErrorContext(ctx, "failed to load feedbag for federation subscriptions", "err", err)
+			} else {
+				for _, item := range items {
+					if item.ClassID == wire.FeedbagClassIdBuddy {
+						buddyName := state.NewIdentScreenName(item.Name)
+						if buddyName.Network() != "" {
+							s.federationPresenceMgr.SubscribePresence(ctx, instance.IdentScreenName(), buddyName)
+						}
+					}
+				}
+			}
 		}
 
 		msg := wire.SNACMessage{

@@ -15,6 +15,7 @@ import (
 
 	"github.com/mk6i/open-oscar-server/config"
 	"github.com/mk6i/open-oscar-server/foodgroup"
+	"github.com/mk6i/open-oscar-server/server/federation"
 	"github.com/mk6i/open-oscar-server/server/http"
 	"github.com/mk6i/open-oscar-server/server/kerberos"
 	"github.com/mk6i/open-oscar-server/server/oscar"
@@ -39,6 +40,7 @@ type Container struct {
 	sqLiteUserStore        *state.SQLiteUserStore
 	webAPISessionManager   *state.WebAPISessionManager
 	Listeners              []config.Listener
+	federationManager      *federation.Manager
 }
 
 // MakeCommonDeps creates common dependencies used by the food group services.
@@ -80,6 +82,24 @@ func MakeCommonDeps() (Container, error) {
 	c.rateLimitClasses = wire.DefaultRateLimitClasses()
 	c.snacRateLimits = wire.DefaultSNACRateLimits()
 
+	// Initialize federation manager if configured
+	if c.cfg.FederationEnabled() {
+		peerConfigs, err := c.cfg.ParseFederationPeers()
+		if err != nil {
+			return c, fmt.Errorf("unable to parse federation peers: %s", err.Error())
+		}
+		c.federationManager = federation.NewManager(
+			c.cfg.FederationNetworkName,
+			peerConfigs,
+			c.inMemorySessionManager,
+			c.inMemorySessionManager,
+			c.inMemorySessionManager,
+			c.sqLiteUserStore,
+			c.sqLiteUserStore,
+			c.logger,
+		)
+	}
+
 	// ICBM svc is a common dep because OSCAR and TOC need to share convo history state.
 	c.icbmSvc = foodgroup.NewICBMService(
 		c.sqLiteUserStore,
@@ -92,6 +112,10 @@ func MakeCommonDeps() (Container, error) {
 		c.snacRateLimits,
 		c.logger,
 	)
+	// Set federation on ICBM service if configured
+	if c.federationManager != nil {
+		c.icbmSvc.SetFederation(c.federationManager, c.cfg.FederationNetworkName)
+	}
 
 	return c, nil
 }
@@ -254,6 +278,9 @@ func OSCAR(deps Container) *oscar.Server {
 		deps.inMemorySessionManager,
 		deps.sqLiteUserStore,
 	)
+	if deps.federationManager != nil {
+		buddyService.SetFederationPresence(deps.federationManager)
+	}
 	chatService := foodgroup.NewChatService(deps.chatSessionManager)
 	chatNavService := foodgroup.NewChatNavService(logger, deps.sqLiteUserStore)
 	feedbagService := foodgroup.NewFeedbagService(
@@ -264,6 +291,9 @@ func OSCAR(deps Container) *oscar.Server {
 		deps.sqLiteUserStore,
 		deps.inMemorySessionManager,
 	)
+	if deps.federationManager != nil {
+		feedbagService = feedbagService.SetFederationPresence(deps.federationManager)
+	}
 	permitDenyService := foodgroup.NewPermitDenyService(
 		deps.sqLiteUserStore,
 		deps.sqLiteUserStore,
@@ -301,6 +331,9 @@ func OSCAR(deps Container) *oscar.Server {
 		deps.sqLiteUserStore,
 		deps.sqLiteUserStore,
 	)
+	if deps.federationManager != nil {
+		oServiceService.SetFederation(deps.federationManager, deps.sqLiteUserStore)
+	}
 	userLookupService := foodgroup.NewUserLookupService(deps.sqLiteUserStore)
 	statsService := foodgroup.NewStatsService()
 	oDirService := foodgroup.NewODirService(logger, deps.sqLiteUserStore)

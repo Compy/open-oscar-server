@@ -71,6 +71,16 @@ type ICBMService struct {
 	logger                *slog.Logger
 	interval              time.Duration
 	offlineMessageManager OfflineMessageManager
+	federationRouter      FederationMessageRouter // nil when federation disabled
+	localNetwork          string                  // empty when federation disabled
+}
+
+// SetFederation configures federation message routing on the ICBM service.
+// When set, messages to screen names with @network suffixes are routed via
+// the federation manager instead of local delivery.
+func (s *ICBMService) SetFederation(router FederationMessageRouter, localNetwork string) {
+	s.federationRouter = router
+	s.localNetwork = localNetwork
 }
 
 // ParameterQuery returns ICBM service parameters.
@@ -98,6 +108,11 @@ func (s ICBMService) ParameterQuery(_ context.Context, inFrame wire.SNACFrame) w
 // flag.
 func (s ICBMService) ChannelMsgToHost(ctx context.Context, instance *state.SessionInstance, inFrame wire.SNACFrame, inBody wire.SNAC_0x04_0x06_ICBMChannelMsgToHost) (*wire.SNACMessage, error) {
 	recip := state.NewIdentScreenName(inBody.ScreenName)
+
+	// Route to federation if the recipient is on a remote network
+	if s.federationRouter != nil && !recip.IsLocal(s.localNetwork) {
+		return s.federationRouter.RouteMessage(ctx, instance, inFrame, inBody)
+	}
 
 	rel, err := s.relationshipFetcher.Relationship(ctx, instance.IdentScreenName(), recip)
 	if err != nil {
@@ -389,7 +404,14 @@ func stripHTMLFromICBMTLV(tlv wire.TLV) (wire.TLV, error) {
 // ClientEvent relays SNAC wire.ICBMClientEvent typing events from the
 // sender to the recipient.
 func (s ICBMService) ClientEvent(ctx context.Context, instance *state.SessionInstance, inFrame wire.SNACFrame, inBody wire.SNAC_0x04_0x14_ICBMClientEvent) error {
-	blocked, err := s.relationshipFetcher.Relationship(ctx, instance.IdentScreenName(), state.NewIdentScreenName(inBody.ScreenName))
+	recip := state.NewIdentScreenName(inBody.ScreenName)
+
+	// Route to federation if the recipient is on a remote network
+	if s.federationRouter != nil && !recip.IsLocal(s.localNetwork) {
+		return s.federationRouter.RouteTypingEvent(ctx, instance, inFrame, inBody)
+	}
+
+	blocked, err := s.relationshipFetcher.Relationship(ctx, instance.IdentScreenName(), recip)
 
 	switch {
 	case err != nil:
@@ -397,8 +419,7 @@ func (s ICBMService) ClientEvent(ctx context.Context, instance *state.SessionIns
 	case blocked.BlocksYou || blocked.YouBlock:
 		return nil
 	default:
-		recipient := state.NewIdentScreenName(inBody.ScreenName)
-		s.messageRelayer.RelayToScreenNameActiveOnly(ctx, recipient, wire.SNACMessage{
+		s.messageRelayer.RelayToScreenNameActiveOnly(ctx, recip, wire.SNACMessage{
 			Frame: wire.SNACFrame{
 				FoodGroup: wire.ICBM,
 				SubGroup:  wire.ICBMClientEvent,

@@ -34,11 +34,20 @@ func NewFeedbagService(
 // FeedbagService provides functionality for the Feedbag food group, which
 // handles buddy list management.
 type FeedbagService struct {
-	bartItemManager  BARTItemManager
-	buddyBroadcaster buddyBroadcaster
-	feedbagManager   FeedbagManager
-	logger           *slog.Logger
-	messageRelayer   MessageRelayer
+	bartItemManager       BARTItemManager
+	buddyBroadcaster      buddyBroadcaster
+	feedbagManager        FeedbagManager
+	logger                *slog.Logger
+	messageRelayer        MessageRelayer
+	federationPresenceMgr FederationPresenceManager // nil when federation disabled
+}
+
+// SetFederationPresence configures federation presence subscriptions on the
+// feedbag service. When set, adding/removing buddies with @network suffixes
+// triggers presence subscribe/unsubscribe on the federation link.
+func (s *FeedbagService) SetFederationPresence(mgr FederationPresenceManager) FeedbagService {
+	s.federationPresenceMgr = mgr
+	return *s
 }
 
 // RightsQuery returns SNAC wire.FeedbagRightsReply, which contains Feedbag
@@ -245,6 +254,18 @@ func (s FeedbagService) UpsertItem(ctx context.Context, instance *state.SessionI
 		}
 	}
 
+	// Subscribe to federation presence for any remote buddies added
+	if s.federationPresenceMgr != nil {
+		for _, item := range items {
+			if item.ClassID == wire.FeedbagClassIdBuddy {
+				buddyName := state.NewIdentScreenName(item.Name)
+				if buddyName.Network() != "" {
+					s.federationPresenceMgr.SubscribePresence(ctx, instance.IdentScreenName(), buddyName)
+				}
+			}
+		}
+	}
+
 	return nil, nil
 }
 
@@ -369,6 +390,18 @@ func (s FeedbagService) DeleteItem(ctx context.Context, instance *state.SessionI
 
 	if err := s.buddyBroadcaster.BroadcastVisibility(ctx, instance, filter, true); err != nil {
 		return nil, err
+	}
+
+	// Unsubscribe from federation presence for any remote buddies removed
+	if s.federationPresenceMgr != nil {
+		for _, item := range inBody.Items {
+			if item.ClassID == wire.FeedbagClassIdBuddy {
+				buddyName := state.NewIdentScreenName(item.Name)
+				if buddyName.Network() != "" {
+					s.federationPresenceMgr.UnsubscribePresence(ctx, instance.IdentScreenName(), buddyName)
+				}
+			}
+		}
 	}
 
 	return nil, nil

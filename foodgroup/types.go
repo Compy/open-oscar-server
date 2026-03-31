@@ -380,6 +380,29 @@ type SessionRetriever interface {
 	RetrieveSession(screenName state.IdentScreenName) *state.Session
 }
 
+// FederationMessageRouter defines methods for routing messages and typing
+// events to users on federated servers.
+type FederationMessageRouter interface {
+	// RouteMessage routes an instant message to a user on a remote federated server.
+	RouteMessage(ctx context.Context, instance *state.SessionInstance, inFrame wire.SNACFrame, inBody wire.SNAC_0x04_0x06_ICBMChannelMsgToHost) (*wire.SNACMessage, error)
+
+	// RouteTypingEvent routes a typing notification to a user on a remote federated server.
+	RouteTypingEvent(ctx context.Context, instance *state.SessionInstance, inFrame wire.SNACFrame, inBody wire.SNAC_0x04_0x14_ICBMClientEvent) error
+}
+
+// FederationPresenceManager defines methods for managing presence subscriptions
+// across federated servers.
+type FederationPresenceManager interface {
+	// SubscribePresence subscribes a local user to a remote user's presence notifications.
+	SubscribePresence(ctx context.Context, localUser state.IdentScreenName, remoteUser state.IdentScreenName) error
+
+	// UnsubscribePresence unsubscribes a local user from a remote user's presence notifications.
+	UnsubscribePresence(ctx context.Context, localUser state.IdentScreenName, remoteUser state.IdentScreenName) error
+
+	// NotifyPresence notifies federation peers that a local user has come online or gone offline.
+	NotifyPresence(ctx context.Context, screenName state.IdentScreenName, online bool) error
+}
+
 // UserManager defines methods for accessing and inserting AIM user records.
 type UserManager interface {
 	// InsertUser inserts a new user into the system. Return state.ErrDupUser

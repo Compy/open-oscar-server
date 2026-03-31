@@ -52,6 +52,17 @@ type Config struct {
 	DisableAuth            bool   `envconfig:"DISABLE_AUTH" required:"true" basic:"true" ssl:"true" description:"Disable password check and auto-create new users at login time. Useful for quickly creating new accounts during development without having to register new users via the management API."`
 	DisableMultiLoginNotif bool   `envconfig:"DISABLE_MULTI_LOGIN_NOTIF" required:"false" basic:"true" ssl:"true" description:"Disable notification sent when another client signs in with the same screen name."`
 	LogLevel               string `envconfig:"LOG_LEVEL" required:"true" basic:"info" ssl:"info" description:"Set logging granularity. Possible values: 'trace', 'debug', 'info', 'warn', 'error'."`
+
+	FederationNetworkName string   `envconfig:"FEDERATION_NETWORK_NAME" required:"false" description:"Unique network name for this server instance used in federation. When set, enables federation support. Users on federated servers are addressed as screenname@networkname (e.g., user@retra.im)."`
+	FederationListener    string   `envconfig:"FEDERATION_LISTENER" required:"false" description:"Network listener address for incoming federation peer connections.\n\nFormat: HOST:PORT\n\nExample: 0.0.0.0:5195"`
+	FederationPeers       []string `envconfig:"FEDERATION_PEERS" required:"false" description:"Comma-separated list of federation peer definitions.\n\nFormat: NAME@HOST:PORT:SECRET\n\nExample: chivanet.org@peering.chivanet.org:5195:mysharedsecret"`
+}
+
+// FederationPeerConfig holds the parsed configuration for a single federation peer.
+type FederationPeerConfig struct {
+	NetworkName string
+	Address     string // host:port
+	Secret      string
 }
 
 func (c *Config) ParseListenersCfg() ([]Listener, error) {
@@ -176,6 +187,72 @@ func (c *Config) ParseListenersCfg() ([]Listener, error) {
 	return ret, nil
 }
 
+// ParseFederationPeers parses the FEDERATION_PEERS configuration entries into
+// FederationPeerConfig structs. Each entry has the format NAME@HOST:PORT:SECRET.
+func (c *Config) ParseFederationPeers() ([]FederationPeerConfig, error) {
+	var peers []FederationPeerConfig
+	seen := make(map[string]bool)
+
+	for _, raw := range c.FederationPeers {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+
+		// Split on first '@' to get network name
+		atIdx := strings.Index(raw, "@")
+		if atIdx < 1 {
+			return nil, fmt.Errorf("invalid federation peer %q: missing network name before '@'. Format: NAME@HOST:PORT:SECRET", raw)
+		}
+		networkName := strings.ToLower(raw[:atIdx])
+		rest := raw[atIdx+1:]
+
+		// The rest is HOST:PORT:SECRET. Split from the last ':' to get secret,
+		// then the remainder is HOST:PORT.
+		lastColon := strings.LastIndex(rest, ":")
+		if lastColon < 0 {
+			return nil, fmt.Errorf("invalid federation peer %q: missing secret. Format: NAME@HOST:PORT:SECRET", raw)
+		}
+		secret := rest[lastColon+1:]
+		hostPort := rest[:lastColon]
+
+		if secret == "" {
+			return nil, fmt.Errorf("invalid federation peer %q: secret cannot be empty", raw)
+		}
+
+		// Validate host:port
+		host, port, err := net.SplitHostPort(hostPort)
+		if err != nil {
+			return nil, fmt.Errorf("invalid federation peer %q: invalid address %q: %v", raw, hostPort, err)
+		}
+		if host == "" || port == "" {
+			return nil, fmt.Errorf("invalid federation peer %q: host and port are required", raw)
+		}
+
+		if seen[networkName] {
+			return nil, fmt.Errorf("duplicate federation peer network name: %s", networkName)
+		}
+		seen[networkName] = true
+
+		if strings.EqualFold(networkName, c.FederationNetworkName) {
+			return nil, fmt.Errorf("federation peer network name %q collides with local network name", networkName)
+		}
+
+		peers = append(peers, FederationPeerConfig{
+			NetworkName: networkName,
+			Address:     hostPort,
+			Secret:      secret,
+		})
+	}
+
+	return peers, nil
+}
+
+// FederationEnabled returns true if federation is configured.
+func (c *Config) FederationEnabled() bool {
+	return c.FederationNetworkName != ""
+}
+
 func (c *Config) Validate() error {
 	// Validate TOCListeners (format: hostname:port pairs)
 	for _, listener := range c.TOCListeners {
@@ -215,6 +292,25 @@ func (c *Config) Validate() error {
 
 	if port == "" {
 		return fmt.Errorf("invalid API listener %q: missing port. Valid format: HOST:PORT (e.g., 127.0.0.1:8080)", c.APIListener)
+	}
+
+	// Validate federation config
+	if c.FederationNetworkName != "" {
+		if len(c.FederationPeers) > 0 && c.FederationListener == "" {
+			return fmt.Errorf("FEDERATION_LISTENER is required when FEDERATION_PEERS are configured")
+		}
+		if c.FederationListener != "" {
+			fHost, fPort, err := net.SplitHostPort(c.FederationListener)
+			if err != nil {
+				return fmt.Errorf("invalid federation listener %q: %v", c.FederationListener, err)
+			}
+			if fHost == "" || fPort == "" {
+				return fmt.Errorf("invalid federation listener %q: host and port are required", c.FederationListener)
+			}
+		}
+		if _, err := c.ParseFederationPeers(); err != nil {
+			return err
+		}
 	}
 
 	return nil

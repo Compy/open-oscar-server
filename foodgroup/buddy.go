@@ -26,6 +26,14 @@ func NewBuddyService(
 type BuddyService struct {
 	clientSideBuddyListManager ClientSideBuddyListManager
 	buddyBroadcaster           buddyBroadcaster
+	federationPresenceMgr      FederationPresenceManager // nil when federation disabled
+}
+
+// SetFederationPresence configures federation presence notifications on the
+// buddy service. When set, buddy arrival/departure events are also sent to
+// federation peers that have subscribed to the user's presence.
+func (s *BuddyService) SetFederationPresence(mgr FederationPresenceManager) {
+	s.federationPresenceMgr = mgr
 }
 
 // RightsQuery returns buddy list service parameters.
@@ -125,11 +133,29 @@ func (s BuddyService) DelTempBuddies(ctx context.Context, instance *state.Sessio
 
 // BroadcastBuddyArrived broadcasts buddy arrival with custom user info (implements DepartureNotifier)
 func (s BuddyService) BroadcastBuddyArrived(ctx context.Context, screenName state.IdentScreenName, userInfo wire.TLVUserInfo) error {
-	return s.buddyBroadcaster.BroadcastBuddyArrived(ctx, screenName, userInfo)
+	if err := s.buddyBroadcaster.BroadcastBuddyArrived(ctx, screenName, userInfo); err != nil {
+		return err
+	}
+	// Notify federation peers about this user coming online
+	if s.federationPresenceMgr != nil {
+		if err := s.federationPresenceMgr.NotifyPresence(ctx, screenName, true); err != nil {
+			return fmt.Errorf("federation NotifyPresence: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s BuddyService) BroadcastBuddyDeparted(ctx context.Context, screenName state.IdentScreenName) error {
-	return s.buddyBroadcaster.BroadcastBuddyDeparted(ctx, screenName)
+	if err := s.buddyBroadcaster.BroadcastBuddyDeparted(ctx, screenName); err != nil {
+		return err
+	}
+	// Notify federation peers about this user going offline
+	if s.federationPresenceMgr != nil {
+		if err := s.federationPresenceMgr.NotifyPresence(ctx, screenName, false); err != nil {
+			return fmt.Errorf("federation NotifyPresence: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s BuddyService) BroadcastVisibility(ctx context.Context, you *state.SessionInstance, filter []state.IdentScreenName, doSendDepartures bool) error {
