@@ -25,6 +25,8 @@ const (
 	FedTypingEvent          uint16 = 0x000A
 	FedKeepAlive            uint16 = 0x000B
 	FedPresenceSubscribeAck uint16 = 0x000C
+	FedUserInfoQuery        uint16 = 0x000D
+	FedUserInfoReply        uint16 = 0x000E
 )
 
 //
@@ -136,5 +138,22 @@ type SNAC_0x0100_0x000B_FedKeepAlive struct{}
 type SNAC_0x0100_0x000C_FedPresenceSubscribeAck struct {
 	ScreenName string `oscar:"len_prefix=uint8"`
 	Online     uint8
+	TLVRestBlock
+}
+
+// SNAC_0x0100_0x000D_FedUserInfoQuery requests profile and/or away message
+// data for a user on the remote server. Cookie correlates the reply.
+type SNAC_0x0100_0x000D_FedUserInfoQuery struct {
+	Cookie uint64
+	ToUser string `oscar:"len_prefix=uint8"`
+	Type   uint16 // bitmask: LocateTypeSig, LocateTypeUnavailable
+}
+
+// SNAC_0x0100_0x000E_FedUserInfoReply returns profile and/or away message
+// data for a user in response to a FedUserInfoQuery.
+type SNAC_0x0100_0x000E_FedUserInfoReply struct {
+	Cookie     uint64
+	ScreenName string `oscar:"len_prefix=uint8"`
+	Flags      uint16
 	TLVRestBlock
 }

@@ -496,7 +496,7 @@ func TestLocateService_SetKeywordInfo(t *testing.T) {
 					Return(params.err)
 			}
 			messageRelayer := newMockMessageRelayer(t)
-			svc := NewLocateService(nil, messageRelayer, profileManager, nil, nil, nil)
+			svc := NewLocateService(nil, messageRelayer, profileManager, nil, nil, nil, nil)
 			outputSNAC, err := svc.SetKeywordInfo(context.Background(), tt.instance, tt.inputSNAC.Frame, tt.inputSNAC.Body.(wire.SNAC_0x02_0x0F_LocateSetKeywordInfo))
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectOutput, outputSNAC)
@@ -586,7 +586,7 @@ func TestLocateService_SetDirInfo(t *testing.T) {
 					Return(nil)
 			}
 			messageRelayer := newMockMessageRelayer(t)
-			svc := NewLocateService(nil, messageRelayer, profileManager, nil, nil, nil)
+			svc := NewLocateService(nil, messageRelayer, profileManager, nil, nil, nil, nil)
 			outputSNAC, err := svc.SetDirInfo(context.Background(), tt.instance, tt.inputSNAC.Frame, tt.inputSNAC.Body.(wire.SNAC_0x02_0x09_LocateSetDirInfo))
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectOutput, outputSNAC)
@@ -792,7 +792,7 @@ func TestLocateService_SetInfo(t *testing.T) {
 					t.Fail()
 				}
 			}
-			svc := NewLocateService(nil, messageRelayer, profileManager, nil, nil, nil)
+			svc := NewLocateService(nil, messageRelayer, profileManager, nil, nil, nil, nil)
 			svc.buddyBroadcaster = buddyUpdateBroadcaster
 
 			err := svc.SetInfo(context.Background(), tt.instance, tt.inBody)
@@ -805,7 +805,7 @@ func TestLocateService_SetInfo(t *testing.T) {
 
 func TestLocateService_SetInfo_SetCaps(t *testing.T) {
 	messageRelayer := newMockMessageRelayer(t)
-	svc := NewLocateService(nil, messageRelayer, nil, nil, nil, nil)
+	svc := NewLocateService(nil, messageRelayer, nil, nil, nil, nil, nil)
 
 	instance := newTestInstance("screen-name")
 	inBody := wire.SNAC_0x02_0x04_LocateSetInfo{
@@ -839,7 +839,7 @@ func TestLocateService_SetInfo_SetCaps(t *testing.T) {
 
 func TestLocateService_RightsQuery(t *testing.T) {
 	messageRelayer := newMockMessageRelayer(t)
-	svc := NewLocateService(nil, messageRelayer, nil, nil, nil, nil)
+	svc := NewLocateService(nil, messageRelayer, nil, nil, nil, nil, nil)
 
 	outputSNAC := svc.RightsQuery(context.Background(), wire.SNACFrame{RequestID: 1234})
 	expectSNAC := wire.SNACMessage{
@@ -984,7 +984,7 @@ func TestLocateService_DirInfo(t *testing.T) {
 					Return(params.result, params.err)
 			}
 			messageRelayer := newMockMessageRelayer(t)
-			svc := NewLocateService(nil, messageRelayer, profileManager, nil, nil, nil)
+			svc := NewLocateService(nil, messageRelayer, profileManager, nil, nil, nil, nil)
 			outputSNAC, err := svc.DirInfo(context.Background(), tt.inputSNAC.Frame, tt.inputSNAC.Body.(wire.SNAC_0x02_0x0B_LocateGetDirInfo))
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectOutput, outputSNAC)

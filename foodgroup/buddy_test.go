@@ -12,7 +12,7 @@ import (
 )
 
 func TestBuddyService_RightsQuery(t *testing.T) {
-	svc := NewBuddyService(nil, nil, nil, nil, nil)
+	svc := NewBuddyService(nil, nil, nil, nil, nil, nil)
 
 	want := wire.SNACMessage{
 		Frame: wire.SNACFrame{

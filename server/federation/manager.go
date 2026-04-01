@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mk6i/open-oscar-server/config"
@@ -28,7 +29,14 @@ const (
 	sendChanSize              = 256
 	maxReconnectBackoff       = 60 * time.Second
 	initialReconnectBackoff   = 1 * time.Second
+	userInfoQueryTimeout      = 10 * time.Second
 )
+
+// userInfoPendingRequest holds the channel used to deliver a FedUserInfoReply
+// back to the goroutine that initiated the query.
+type userInfoPendingRequest struct {
+	replyCh chan wire.SNAC_0x0100_0x000E_FedUserInfoReply
+}
 
 // MessageRelayer defines methods for delivering SNAC messages to local users.
 type MessageRelayer interface {
@@ -48,6 +56,11 @@ type RelationshipFetcher interface {
 // FeedbagRetriever retrieves buddy list entries for a user.
 type FeedbagRetriever interface {
 	Feedbag(ctx context.Context, screenName state.IdentScreenName) ([]wire.FeedbagItem, error)
+}
+
+// ProfileRetriever retrieves a user's server-side profile.
+type ProfileRetriever interface {
+	Profile(ctx context.Context, screenName state.IdentScreenName) (state.UserProfile, error)
 }
 
 // AllSessionsRetriever retrieves all online sessions.
@@ -77,12 +90,18 @@ type Manager struct {
 	allSessionRetriever AllSessionsRetriever
 	relationshipFetcher RelationshipFetcher
 	feedbagRetriever    FeedbagRetriever
+	profileRetriever    ProfileRetriever
 	logger              *slog.Logger
 	mu                  sync.RWMutex
 
 	// Presence subscriptions: remoteUser@network -> set of local subscribers
 	presenceSubs   map[state.IdentScreenName]map[state.IdentScreenName]bool
 	presenceSubsMu sync.RWMutex
+
+	// Pending user info queries awaiting replies from remote peers
+	pendingUserInfo   map[uint64]*userInfoPendingRequest
+	pendingUserInfoMu sync.Mutex
+	cookieCounter     atomic.Uint64
 }
 
 // NewManager creates a new federation Manager.
@@ -94,6 +113,7 @@ func NewManager(
 	allSessionRetriever AllSessionsRetriever,
 	relationshipFetcher RelationshipFetcher,
 	feedbagRetriever FeedbagRetriever,
+	profileRetriever ProfileRetriever,
 	logger *slog.Logger,
 ) *Manager {
 	peers := make(map[string]*PeerConnection)
@@ -112,8 +132,10 @@ func NewManager(
 		allSessionRetriever: allSessionRetriever,
 		relationshipFetcher: relationshipFetcher,
 		feedbagRetriever:    feedbagRetriever,
+		profileRetriever:    profileRetriever,
 		logger:              logger,
 		presenceSubs:        make(map[state.IdentScreenName]map[state.IdentScreenName]bool),
+		pendingUserInfo:     make(map[uint64]*userInfoPendingRequest),
 	}
 }
 
@@ -470,6 +492,10 @@ func (m *Manager) handleInboundSNAC(ctx context.Context, pc *PeerConnection, pay
 		m.handleFedPresenceSubscribeAck(ctx, pc, buf)
 	case wire.FedTypingEvent:
 		m.handleFedTypingEvent(ctx, pc, buf)
+	case wire.FedUserInfoQuery:
+		m.handleFedUserInfoQuery(ctx, pc, buf)
+	case wire.FedUserInfoReply:
+		m.handleFedUserInfoReply(pc, buf)
 	case wire.FedKeepAlive:
 		// no-op
 	default:
@@ -902,12 +928,19 @@ func (m *Manager) RouteTypingEvent(_ context.Context, instance *state.SessionIns
 	recip := state.NewIdentScreenName(inBody.ScreenName)
 	network := recip.Network()
 
+	m.logger.Debug("send FedTypingEvent",
+		"from", instance.IdentScreenName(),
+		"to", recip,
+		"network", network,
+	)
+
 	m.mu.RLock()
 	pc, ok := m.peers[network]
 	m.mu.RUnlock()
 
 	if !ok {
-		return nil // silently drop typing events to unknown networks
+		m.logger.Debug("federation typing event dropped: unknown network", "network", network)
+		return nil
 	}
 
 	pc.mu.Lock()
@@ -915,6 +948,7 @@ func (m *Manager) RouteTypingEvent(_ context.Context, instance *state.SessionIns
 	pc.mu.Unlock()
 
 	if !connected {
+		m.logger.Debug("federation typing event dropped: peer not connected", "peer", network)
 		return nil
 	}
 
@@ -937,6 +971,182 @@ func (m *Manager) RouteTypingEvent(_ context.Context, instance *state.SessionIns
 	}
 
 	return nil
+}
+
+// QueryUserInfo sends a FedUserInfoQuery to the remote server hosting
+// remoteUser and blocks until a FedUserInfoReply is received or the request
+// times out.
+func (m *Manager) QueryUserInfo(ctx context.Context, remoteUser state.IdentScreenName, requestType uint16) (*wire.SNAC_0x0100_0x000E_FedUserInfoReply, error) {
+	network := remoteUser.Network()
+
+	m.logger.Debug("send FedUserInfoQuery",
+		"remote_user", remoteUser,
+		"network", network,
+		"type", requestType,
+	)
+
+	m.mu.RLock()
+	pc, ok := m.peers[network]
+	m.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("unknown federation network: %s", network)
+	}
+
+	pc.mu.Lock()
+	connected := pc.connected
+	pc.mu.Unlock()
+
+	if !connected {
+		return nil, fmt.Errorf("federation peer not connected: %s", network)
+	}
+
+	cookie := m.cookieCounter.Add(1)
+
+	pending := &userInfoPendingRequest{
+		replyCh: make(chan wire.SNAC_0x0100_0x000E_FedUserInfoReply, 1),
+	}
+	m.pendingUserInfoMu.Lock()
+	m.pendingUserInfo[cookie] = pending
+	m.pendingUserInfoMu.Unlock()
+
+	defer func() {
+		m.pendingUserInfoMu.Lock()
+		delete(m.pendingUserInfo, cookie)
+		m.pendingUserInfoMu.Unlock()
+	}()
+
+	select {
+	case pc.sendCh <- wire.SNACMessage{
+		Frame: wire.SNACFrame{
+			FoodGroup: wire.Federation,
+			SubGroup:  wire.FedUserInfoQuery,
+		},
+		Body: wire.SNAC_0x0100_0x000D_FedUserInfoQuery{
+			Cookie: cookie,
+			ToUser: remoteUser.LocalPart().String(),
+			Type:   requestType,
+		},
+	}:
+	default:
+		return nil, fmt.Errorf("send channel full for peer: %s", network)
+	}
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, userInfoQueryTimeout)
+	defer cancel()
+
+	select {
+	case reply := <-pending.replyCh:
+		return &reply, nil
+	case <-timeoutCtx.Done():
+		return nil, fmt.Errorf("user info query timed out for %s", remoteUser)
+	}
+}
+
+// handleFedUserInfoQuery processes an inbound user info query from a peer.
+// It looks up the requested local user's profile and away message and sends
+// a FedUserInfoReply back to the requesting peer.
+func (m *Manager) handleFedUserInfoQuery(ctx context.Context, pc *PeerConnection, r io.Reader) {
+	var query wire.SNAC_0x0100_0x000D_FedUserInfoQuery
+	if err := wire.UnmarshalBE(&query, r); err != nil {
+		m.logger.Error("failed to unmarshal FedUserInfoQuery", "err", err)
+		return
+	}
+
+	localUser := state.NewIdentScreenName(query.ToUser)
+
+	m.logger.Debug("recv FedUserInfoQuery",
+		"peer", pc.config.NetworkName,
+		"lookup_user", localUser,
+		"type", query.Type,
+	)
+
+	reply := wire.SNAC_0x0100_0x000E_FedUserInfoReply{
+		Cookie:     query.Cookie,
+		ScreenName: localUser.String(),
+	}
+
+	sess := m.sessionRetriever.RetrieveSession(localUser)
+
+	requestProfile := query.Type&uint16(wire.LocateTypeSig) != 0
+	requestAway := query.Type&uint16(wire.LocateTypeUnavailable) != 0
+
+	if requestProfile {
+		var prof state.UserProfile
+		if sess != nil {
+			prof = sess.Profile()
+		}
+		// Fall back to server-side profile if session profile is empty
+		if prof.ProfileText == "" && m.profileRetriever != nil {
+			if serverProf, err := m.profileRetriever.Profile(ctx, localUser); err == nil {
+				prof = serverProf
+			}
+		}
+		reply.Append(wire.NewTLVBE(wire.LocateTLVTagsInfoSigMime, prof.MIMEType))
+		reply.Append(wire.NewTLVBE(wire.LocateTLVTagsInfoSigData, prof.ProfileText))
+	}
+
+	if requestAway && sess != nil && sess.Away() {
+		reply.Append(wire.NewTLVBE(wire.LocateTLVTagsInfoUnavailableMime, `text/aolrtf; charset="us-ascii"`))
+		reply.Append(wire.NewTLVBE(wire.LocateTLVTagsInfoUnavailableData, sess.AwayMessage()))
+	}
+
+	if sess != nil {
+		// Extract user flags from session
+		for _, tlv := range sess.TLVUserInfo().TLVList {
+			if tlv.Tag == wire.OServiceUserInfoUserFlags && len(tlv.Value) >= 2 {
+				reply.Flags = uint16(tlv.Value[0])<<8 | uint16(tlv.Value[1])
+				break
+			}
+		}
+	}
+
+	select {
+	case pc.sendCh <- wire.SNACMessage{
+		Frame: wire.SNACFrame{
+			FoodGroup: wire.Federation,
+			SubGroup:  wire.FedUserInfoReply,
+		},
+		Body: reply,
+	}:
+	default:
+		m.logger.Warn("failed to send FedUserInfoReply: send channel full",
+			"peer", pc.config.NetworkName,
+		)
+	}
+}
+
+// handleFedUserInfoReply processes an inbound user info reply from a peer,
+// delivering it to the goroutine waiting on the matching cookie.
+func (m *Manager) handleFedUserInfoReply(pc *PeerConnection, r io.Reader) {
+	var reply wire.SNAC_0x0100_0x000E_FedUserInfoReply
+	if err := wire.UnmarshalBE(&reply, r); err != nil {
+		m.logger.Error("failed to unmarshal FedUserInfoReply", "err", err)
+		return
+	}
+
+	m.logger.Debug("recv FedUserInfoReply",
+		"peer", pc.config.NetworkName,
+		"screen_name", reply.ScreenName,
+		"cookie", reply.Cookie,
+	)
+
+	m.pendingUserInfoMu.Lock()
+	pending, ok := m.pendingUserInfo[reply.Cookie]
+	m.pendingUserInfoMu.Unlock()
+
+	if !ok {
+		m.logger.Warn("received FedUserInfoReply with unknown cookie",
+			"peer", pc.config.NetworkName,
+			"cookie", reply.Cookie,
+		)
+		return
+	}
+
+	select {
+	case pending.replyCh <- reply:
+	default:
+	}
 }
 
 // SubscribePresence subscribes a local user to a remote user's presence.
@@ -998,11 +1208,18 @@ func (m *Manager) UnsubscribePresence(ctx context.Context, localUser state.Ident
 		return nil
 	}
 
+	m.logger.Debug("send FedPresenceUnsubscribe",
+		"local_user", localUser,
+		"remote_user", remoteUser,
+		"network", network,
+	)
+
 	m.mu.RLock()
 	pc, ok := m.peers[network]
 	m.mu.RUnlock()
 
 	if !ok {
+		m.logger.Debug("presence unsubscribe skipped: unknown network", "network", network)
 		return nil
 	}
 
@@ -1011,6 +1228,7 @@ func (m *Manager) UnsubscribePresence(ctx context.Context, localUser state.Ident
 	pc.mu.Unlock()
 
 	if !connected {
+		m.logger.Debug("presence unsubscribe deferred: peer not connected", "peer", network)
 		return nil
 	}
 

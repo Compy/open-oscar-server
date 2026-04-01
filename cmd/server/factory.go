@@ -96,6 +96,7 @@ func MakeCommonDeps() (Container, error) {
 			c.inMemorySessionManager,
 			c.sqLiteUserStore,
 			c.sqLiteUserStore,
+			c.sqLiteUserStore,
 			c.logger,
 		)
 	}
@@ -238,6 +239,22 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
+func newLocateService(deps Container, logger *slog.Logger) foodgroup.LocateService {
+	svc := foodgroup.NewLocateService(
+		deps.sqLiteUserStore,
+		deps.inMemorySessionManager,
+		deps.sqLiteUserStore,
+		deps.sqLiteUserStore,
+		deps.inMemorySessionManager,
+		deps.sqLiteUserStore,
+		logger,
+	)
+	if deps.federationManager != nil {
+		svc = svc.SetFederation(deps.cfg.FederationNetworkName, deps.federationManager)
+	}
+	return svc
+}
+
 // OSCAR creates an OSCAR server for the OSCAR food group.
 func OSCAR(deps Container) *oscar.Server {
 	logger := deps.logger.With("svc", "OSCAR")
@@ -277,6 +294,7 @@ func OSCAR(deps Container) *oscar.Server {
 		deps.sqLiteUserStore,
 		deps.inMemorySessionManager,
 		deps.sqLiteUserStore,
+		logger,
 	)
 	if deps.federationManager != nil {
 		buddyService.SetFederationPresence(deps.federationManager)
@@ -309,14 +327,7 @@ func OSCAR(deps Container) *oscar.Server {
 		deps.inMemorySessionManager,
 		deps.sqLiteUserStore,
 	)
-	locateService := foodgroup.NewLocateService(
-		deps.sqLiteUserStore,
-		deps.inMemorySessionManager,
-		deps.sqLiteUserStore,
-		deps.sqLiteUserStore,
-		deps.inMemorySessionManager,
-		deps.sqLiteUserStore,
-	)
+	locateService := newLocateService(deps, logger)
 	oServiceService := foodgroup.NewOServiceService(
 		deps.cfg,
 		deps.inMemorySessionManager,
@@ -411,6 +422,7 @@ func MgmtAPI(deps Container) *http.Server {
 		deps.sqLiteUserStore,
 		deps.inMemorySessionManager,
 		deps.sqLiteUserStore,
+		logger,
 	)
 	return http.NewManagementAPI(
 		bld,
@@ -472,20 +484,14 @@ func TOC(deps Container) *toc.Server {
 				deps.sqLiteUserStore,
 				deps.inMemorySessionManager,
 				deps.sqLiteUserStore,
+				logger,
 			),
 			ChatSessionManager: deps.chatSessionManager,
 			CookieBaker:        deps.hmacCookieBaker,
 			DirSearchService:   foodgroup.NewODirService(logger, deps.sqLiteUserStore),
 			ICBMService:        deps.icbmSvc,
-			LocateService: foodgroup.NewLocateService(
-				deps.sqLiteUserStore,
-				deps.inMemorySessionManager,
-				deps.sqLiteUserStore,
-				deps.sqLiteUserStore,
-				deps.inMemorySessionManager,
-				deps.sqLiteUserStore,
-			),
-			Logger: logger,
+			LocateService:      newLocateService(deps, logger),
+			Logger:             logger,
 			OServiceService: foodgroup.NewOServiceService(
 				deps.cfg,
 				deps.inMemorySessionManager,
@@ -553,6 +559,7 @@ func WebAPI(deps Container) *webapi.Server {
 		deps.sqLiteUserStore,
 		deps.inMemorySessionManager,
 		deps.sqLiteUserStore,
+		logger,
 	)
 
 	handler := webapi.Handler{
@@ -585,19 +592,13 @@ func WebAPI(deps Container) *webapi.Server {
 			deps.sqLiteUserStore,
 			deps.inMemorySessionManager,
 			deps.sqLiteUserStore,
+			logger,
 		),
 		CookieBaker:      deps.hmacCookieBaker,
 		DirSearchService: foodgroup.NewODirService(logger, deps.sqLiteUserStore),
 		ICBMService:      deps.icbmSvc,
-		LocateService: foodgroup.NewLocateService(
-			deps.sqLiteUserStore,
-			deps.inMemorySessionManager,
-			deps.sqLiteUserStore,
-			deps.sqLiteUserStore,
-			deps.inMemorySessionManager,
-			deps.sqLiteUserStore,
-		),
-		Logger: logger,
+		LocateService:    newLocateService(deps, logger),
+		Logger:           logger,
 		OServiceService: foodgroup.NewOServiceService(
 			deps.cfg,
 			deps.inMemorySessionManager,

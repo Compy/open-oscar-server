@@ -260,6 +260,7 @@ func (s FeedbagService) UpsertItem(ctx context.Context, instance *state.SessionI
 			if item.ClassID == wire.FeedbagClassIdBuddy {
 				buddyName := state.NewIdentScreenName(item.Name)
 				if buddyName.Network() != "" {
+					s.logger.DebugContext(ctx, "subscribing to federated buddy presence", "local_user", instance.IdentScreenName(), "remote_user", buddyName, "network", buddyName.Network())
 					s.federationPresenceMgr.SubscribePresence(ctx, instance.IdentScreenName(), buddyName)
 				}
 			}
@@ -398,6 +399,7 @@ func (s FeedbagService) DeleteItem(ctx context.Context, instance *state.SessionI
 			if item.ClassID == wire.FeedbagClassIdBuddy {
 				buddyName := state.NewIdentScreenName(item.Name)
 				if buddyName.Network() != "" {
+					s.logger.DebugContext(ctx, "unsubscribing from federated buddy presence", "local_user", instance.IdentScreenName(), "remote_user", buddyName, "network", buddyName.Network())
 					s.federationPresenceMgr.UnsubscribePresence(ctx, instance.IdentScreenName(), buddyName)
 				}
 			}

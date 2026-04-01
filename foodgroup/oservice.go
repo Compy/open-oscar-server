@@ -698,6 +698,7 @@ func (s OServiceService) ClientOnline(ctx context.Context, service uint16, inBod
 		// BuddyService.BroadcastBuddyArrived where the federation
 		// hook lives. So we must notify federation peers explicitly.
 		if s.federationPresenceMgr != nil && !instance.Session().Invisible() {
+			s.logger.DebugContext(ctx, "notifying federation peers of sign-on", "screen_name", instance.IdentScreenName())
 			if err := s.federationPresenceMgr.NotifyPresence(ctx, instance.IdentScreenName(), true); err != nil {
 				s.logger.ErrorContext(ctx, "failed to send federation presence notification", "err", err)
 			}
@@ -713,6 +714,7 @@ func (s OServiceService) ClientOnline(ctx context.Context, service uint16, inBod
 					if item.ClassID == wire.FeedbagClassIdBuddy {
 						buddyName := state.NewIdentScreenName(item.Name)
 						if buddyName.Network() != "" {
+							s.logger.DebugContext(ctx, "subscribing to federated buddy on sign-on", "local_user", instance.IdentScreenName(), "remote_user", buddyName, "network", buddyName.Network())
 							s.federationPresenceMgr.SubscribePresence(ctx, instance.IdentScreenName(), buddyName)
 						}
 					}

@@ -3,6 +3,7 @@ package foodgroup
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/mk6i/open-oscar-server/state"
 	"github.com/mk6i/open-oscar-server/wire"
@@ -15,10 +16,12 @@ func NewBuddyService(
 	relationshipFetcher RelationshipFetcher,
 	sessionRetriever SessionRetriever,
 	bartItemManager BARTItemManager,
+	logger *slog.Logger,
 ) *BuddyService {
 	return &BuddyService{
 		buddyBroadcaster:           newBuddyNotifier(bartItemManager, relationshipFetcher, messageRelayer, sessionRetriever),
 		clientSideBuddyListManager: clientSideBuddyListManager,
+		logger:                     logger,
 	}
 }
 
@@ -26,6 +29,7 @@ func NewBuddyService(
 type BuddyService struct {
 	clientSideBuddyListManager ClientSideBuddyListManager
 	buddyBroadcaster           buddyBroadcaster
+	logger                     *slog.Logger
 	federationPresenceMgr      FederationPresenceManager // nil when federation disabled
 }
 
@@ -138,6 +142,7 @@ func (s BuddyService) BroadcastBuddyArrived(ctx context.Context, screenName stat
 	}
 	// Notify federation peers about this user coming online
 	if s.federationPresenceMgr != nil {
+		s.logger.DebugContext(ctx, "routing buddy arrived to federation peers", "screen_name", screenName)
 		if err := s.federationPresenceMgr.NotifyPresence(ctx, screenName, true); err != nil {
 			return fmt.Errorf("federation NotifyPresence: %w", err)
 		}
@@ -151,6 +156,7 @@ func (s BuddyService) BroadcastBuddyDeparted(ctx context.Context, screenName sta
 	}
 	// Notify federation peers about this user going offline
 	if s.federationPresenceMgr != nil {
+		s.logger.DebugContext(ctx, "routing buddy departed to federation peers", "screen_name", screenName)
 		if err := s.federationPresenceMgr.NotifyPresence(ctx, screenName, false); err != nil {
 			return fmt.Errorf("federation NotifyPresence: %w", err)
 		}

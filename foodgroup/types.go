@@ -403,6 +403,14 @@ type FederationPresenceManager interface {
 	NotifyPresence(ctx context.Context, screenName state.IdentScreenName, online bool) error
 }
 
+// FederationUserInfoQuerier defines the method for querying user info
+// (profile, away message) from a remote federated server.
+type FederationUserInfoQuerier interface {
+	// QueryUserInfo sends a user info query to the remote server hosting
+	// remoteUser and blocks until a reply is received or the request times out.
+	QueryUserInfo(ctx context.Context, remoteUser state.IdentScreenName, requestType uint16) (*wire.SNAC_0x0100_0x000E_FedUserInfoReply, error)
+}
+
 // UserManager defines methods for accessing and inserting AIM user records.
 type UserManager interface {
 	// InsertUser inserts a new user into the system. Return state.ErrDupUser

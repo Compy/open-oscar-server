@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/mk6i/open-oscar-server/state"
@@ -26,6 +27,7 @@ func NewLocateService(
 	relationshipFetcher RelationshipFetcher,
 	sessionRetriever SessionRetriever,
 	userManager UserManager,
+	logger *slog.Logger,
 ) LocateService {
 	return LocateService{
 		buddyBroadcaster:    newBuddyNotifier(bartItemManager, relationshipFetcher, messageRelayer, sessionRetriever),
@@ -34,6 +36,7 @@ func NewLocateService(
 		profileManager:      profileManager,
 		sessionRetriever:    sessionRetriever,
 		userManager:         userManager,
+		logger:              logger,
 	}
 }
 
@@ -41,12 +44,24 @@ func NewLocateService(
 // responsible for user profiles, user info lookups, directory information, and
 // keyword lookups.
 type LocateService struct {
-	buddyBroadcaster    buddyBroadcaster
-	messageRelayer      MessageRelayer
-	relationshipFetcher RelationshipFetcher
-	profileManager      ProfileManager
-	sessionRetriever    SessionRetriever
-	userManager         UserManager
+	buddyBroadcaster          buddyBroadcaster
+	messageRelayer            MessageRelayer
+	relationshipFetcher       RelationshipFetcher
+	profileManager            ProfileManager
+	sessionRetriever          SessionRetriever
+	userManager               UserManager
+	logger                    *slog.Logger
+	localNetwork              string                    // empty when federation disabled
+	federationUserInfoQuerier FederationUserInfoQuerier // nil when federation disabled
+}
+
+// SetFederation configures federation on the Locate service. When set,
+// user info queries for screen names with @network suffixes are forwarded
+// to the remote server via the federation manager.
+func (s LocateService) SetFederation(localNetwork string, querier FederationUserInfoQuerier) LocateService {
+	s.localNetwork = localNetwork
+	s.federationUserInfoQuerier = querier
+	return s
 }
 
 // RightsQuery returns SNAC wire.LocateRightsReply, which contains Locate food
@@ -175,6 +190,11 @@ func newLocateErr(requestID uint32, errCode uint16) wire.SNACMessage {
 func (s LocateService) UserInfoQuery(ctx context.Context, instance *state.SessionInstance, inFrame wire.SNACFrame, inBody wire.SNAC_0x02_0x05_LocateUserInfoQuery) (wire.SNACMessage, error) {
 	lookupSN := state.NewIdentScreenName(inBody.ScreenName)
 
+	// Federated users live on remote servers. Query their info via federation.
+	if s.localNetwork != "" && !lookupSN.IsLocal(s.localNetwork) {
+		return s.queryFederatedUserInfo(ctx, instance, inFrame, lookupSN, inBody.Type)
+	}
+
 	var lookupSess *state.Session
 	if lookupSN == instance.IdentScreenName() {
 		// looking up own profile
@@ -228,6 +248,62 @@ func (s LocateService) UserInfoQuery(ctx context.Context, instance *state.Sessio
 			LocateInfo: wire.TLVRestBlock{
 				TLVList: list,
 			},
+		},
+	}, nil
+}
+
+// queryFederatedUserInfo queries a remote federation peer for the user's
+// profile and away message. If the querier is not configured or the query
+// fails, it falls back to a basic stub response.
+func (s LocateService) queryFederatedUserInfo(ctx context.Context, instance *state.SessionInstance, inFrame wire.SNACFrame, lookupSN state.IdentScreenName, requestType uint16) (wire.SNACMessage, error) {
+	stubResponse := wire.SNACMessage{
+		Frame: wire.SNACFrame{
+			FoodGroup: wire.Locate,
+			SubGroup:  wire.LocateUserInfoReply,
+			RequestID: inFrame.RequestID,
+		},
+		Body: wire.SNAC_0x02_0x06_LocateUserInfoReply{
+			TLVUserInfo: wire.TLVUserInfo{
+				ScreenName: lookupSN.String(),
+				TLVBlock: wire.TLVBlock{
+					TLVList: wire.TLVList{
+						wire.NewTLVBE(wire.OServiceUserInfoUserFlags, wire.OServiceUserFlagOSCARFree),
+					},
+				},
+			},
+			LocateInfo: wire.TLVRestBlock{},
+		},
+	}
+
+	if s.federationUserInfoQuerier == nil {
+		s.logger.DebugContext(ctx, "returning stub user info for federated user (no querier configured)", "from", instance.IdentScreenName(), "lookup_user", lookupSN)
+		return stubResponse, nil
+	}
+
+	s.logger.DebugContext(ctx, "querying remote server for federated user info", "from", instance.IdentScreenName(), "lookup_user", lookupSN, "network", lookupSN.Network())
+
+	reply, err := s.federationUserInfoQuerier.QueryUserInfo(ctx, lookupSN, requestType)
+	if err != nil {
+		s.logger.WarnContext(ctx, "federated user info query failed, returning stub", "lookup_user", lookupSN, "err", err)
+		return stubResponse, nil
+	}
+
+	return wire.SNACMessage{
+		Frame: wire.SNACFrame{
+			FoodGroup: wire.Locate,
+			SubGroup:  wire.LocateUserInfoReply,
+			RequestID: inFrame.RequestID,
+		},
+		Body: wire.SNAC_0x02_0x06_LocateUserInfoReply{
+			TLVUserInfo: wire.TLVUserInfo{
+				ScreenName: lookupSN.String(),
+				TLVBlock: wire.TLVBlock{
+					TLVList: wire.TLVList{
+						wire.NewTLVBE(wire.OServiceUserInfoUserFlags, reply.Flags),
+					},
+				},
+			},
+			LocateInfo: reply.TLVRestBlock,
 		},
 	}, nil
 }

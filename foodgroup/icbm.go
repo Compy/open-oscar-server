@@ -111,6 +111,7 @@ func (s ICBMService) ChannelMsgToHost(ctx context.Context, instance *state.Sessi
 
 	// Route to federation if the recipient is on a remote network
 	if s.federationRouter != nil && !recip.IsLocal(s.localNetwork) {
+		s.logger.DebugContext(ctx, "routing message to federation", "from", instance.IdentScreenName(), "to", recip, "network", recip.Network())
 		return s.federationRouter.RouteMessage(ctx, instance, inFrame, inBody)
 	}
 
@@ -408,6 +409,7 @@ func (s ICBMService) ClientEvent(ctx context.Context, instance *state.SessionIns
 
 	// Route to federation if the recipient is on a remote network
 	if s.federationRouter != nil && !recip.IsLocal(s.localNetwork) {
+		s.logger.DebugContext(ctx, "routing typing event to federation", "from", instance.IdentScreenName(), "to", recip, "network", recip.Network())
 		return s.federationRouter.RouteTypingEvent(ctx, instance, inFrame, inBody)
 	}
 
