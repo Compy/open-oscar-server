@@ -388,6 +388,9 @@ type FederationMessageRouter interface {
 
 	// RouteTypingEvent routes a typing notification to a user on a remote federated server.
 	RouteTypingEvent(ctx context.Context, instance *state.SessionInstance, inFrame wire.SNACFrame, inBody wire.SNAC_0x04_0x14_ICBMClientEvent) error
+
+	// RouteEvil routes a warning (evil) request to a user on a remote federated server.
+	RouteEvil(ctx context.Context, instance *state.SessionInstance, inFrame wire.SNACFrame, inBody wire.SNAC_0x04_0x08_ICBMEvilRequest) (wire.SNACMessage, error)
 }
 
 // FederationPresenceManager defines methods for managing presence subscriptions

@@ -38,6 +38,12 @@ type userInfoPendingRequest struct {
 	replyCh chan wire.SNAC_0x0100_0x000E_FedUserInfoReply
 }
 
+// evilPendingRequest holds the channel used to deliver a FedEvilReply
+// back to the goroutine that initiated the evil request.
+type evilPendingRequest struct {
+	replyCh chan wire.SNAC_0x0100_0x0010_FedEvilReply
+}
+
 // MessageRelayer defines methods for delivering SNAC messages to local users.
 type MessageRelayer interface {
 	RelayToScreenName(ctx context.Context, screenName state.IdentScreenName, msg wire.SNACMessage)
@@ -101,7 +107,12 @@ type Manager struct {
 	// Pending user info queries awaiting replies from remote peers
 	pendingUserInfo   map[uint64]*userInfoPendingRequest
 	pendingUserInfoMu sync.Mutex
-	cookieCounter     atomic.Uint64
+
+	// Pending evil requests awaiting replies from remote peers
+	pendingEvil   map[uint64]*evilPendingRequest
+	pendingEvilMu sync.Mutex
+
+	cookieCounter atomic.Uint64
 }
 
 // NewManager creates a new federation Manager.
@@ -136,6 +147,7 @@ func NewManager(
 		logger:              logger,
 		presenceSubs:        make(map[state.IdentScreenName]map[state.IdentScreenName]bool),
 		pendingUserInfo:     make(map[uint64]*userInfoPendingRequest),
+		pendingEvil:         make(map[uint64]*evilPendingRequest),
 	}
 }
 
@@ -496,6 +508,10 @@ func (m *Manager) handleInboundSNAC(ctx context.Context, pc *PeerConnection, pay
 		m.handleFedUserInfoQuery(ctx, pc, buf)
 	case wire.FedUserInfoReply:
 		m.handleFedUserInfoReply(pc, buf)
+	case wire.FedEvilRequest:
+		m.handleFedEvilRequest(ctx, pc, buf)
+	case wire.FedEvilReply:
+		m.handleFedEvilReply(pc, buf)
 	case wire.FedKeepAlive:
 		// no-op
 	default:
@@ -1474,6 +1490,241 @@ func (m *Manager) sendMessageErr(pc *PeerConnection, cookie uint64, code uint16)
 		Body: wire.SNAC_0x0100_0x0006_FedMessageErr{
 			Cookie: cookie,
 			Code:   code,
+		},
+	}:
+	default:
+	}
+}
+
+// RouteEvil routes a warning (evil) request to a federated user.
+// RouteEvil routes a warning (evil) request to a federated user and blocks
+// until the remote server replies with the result.
+func (m *Manager) RouteEvil(ctx context.Context, instance *state.SessionInstance, inFrame wire.SNACFrame, inBody wire.SNAC_0x04_0x08_ICBMEvilRequest) (wire.SNACMessage, error) {
+	recip := state.NewIdentScreenName(inBody.ScreenName)
+	network := recip.Network()
+
+	m.logger.Debug("send FedEvilRequest",
+		"from", instance.IdentScreenName(),
+		"to", recip,
+		"network", network,
+	)
+
+	m.mu.RLock()
+	pc, ok := m.peers[network]
+	m.mu.RUnlock()
+
+	if !ok {
+		m.logger.Debug("federation route failed: unknown network",
+			"network", network,
+		)
+		return *newICBMErr(inFrame.RequestID, wire.ErrorCodeNotLoggedOn), nil
+	}
+
+	pc.mu.Lock()
+	connected := pc.connected
+	pc.mu.Unlock()
+
+	if !connected {
+		m.logger.Debug("federation route failed: peer not connected",
+			"peer", network,
+		)
+		return *newICBMErr(inFrame.RequestID, wire.ErrorCodeNotLoggedOn), nil
+	}
+
+	cookie := m.cookieCounter.Add(1)
+
+	pending := &evilPendingRequest{
+		replyCh: make(chan wire.SNAC_0x0100_0x0010_FedEvilReply, 1),
+	}
+	m.pendingEvilMu.Lock()
+	m.pendingEvil[cookie] = pending
+	m.pendingEvilMu.Unlock()
+
+	defer func() {
+		m.pendingEvilMu.Lock()
+		delete(m.pendingEvil, cookie)
+		m.pendingEvilMu.Unlock()
+	}()
+
+	select {
+	case pc.sendCh <- wire.SNACMessage{
+		Frame: wire.SNACFrame{
+			FoodGroup: wire.Federation,
+			SubGroup:  wire.FedEvilRequest,
+		},
+		Body: wire.SNAC_0x0100_0x000F_FedEvilRequest{
+			Cookie:   cookie,
+			FromUser: instance.IdentScreenName().String(),
+			ToUser:   recip.LocalPart().String(),
+			SendAs:   inBody.SendAs,
+		},
+	}:
+	default:
+		return *newICBMErr(inFrame.RequestID, wire.ErrorCodeServiceUnavailable), nil
+	}
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, userInfoQueryTimeout)
+	defer cancel()
+
+	select {
+	case reply := <-pending.replyCh:
+		if reply.ErrorCode != 0 {
+			return *newICBMErr(inFrame.RequestID, reply.ErrorCode), nil
+		}
+		return wire.SNACMessage{
+			Frame: wire.SNACFrame{
+				FoodGroup: wire.ICBM,
+				SubGroup:  wire.ICBMEvilReply,
+				RequestID: inFrame.RequestID,
+			},
+			Body: wire.SNAC_0x04_0x09_ICBMEvilReply{
+				EvilDeltaApplied: reply.EvilDeltaApplied,
+				UpdatedEvilValue: reply.UpdatedEvilValue,
+			},
+		}, nil
+	case <-timeoutCtx.Done():
+		m.logger.Debug("federation evil request timed out",
+			"to", recip,
+			"network", network,
+		)
+		return *newICBMErr(inFrame.RequestID, wire.ErrorCodeNotLoggedOn), nil
+	}
+}
+
+// handleFedEvilRequest processes an inbound warning (evil) request from a federation peer.
+func (m *Manager) handleFedEvilRequest(ctx context.Context, pc *PeerConnection, r io.Reader) {
+	var msg wire.SNAC_0x0100_0x000F_FedEvilRequest
+	if err := wire.UnmarshalBE(&msg, r); err != nil {
+		m.logger.Error("failed to unmarshal federation evil request", "err", err)
+		return
+	}
+
+	federatedSender := state.NewFederatedIdentScreenName(
+		state.NewIdentScreenName(msg.FromUser),
+		pc.config.NetworkName,
+	)
+	localRecipient := state.NewIdentScreenName(msg.ToUser)
+
+	m.logger.Debug("recv FedEvilRequest",
+		"peer", pc.config.NetworkName,
+		"from", federatedSender,
+		"to", localRecipient,
+		"sendAs", msg.SendAs,
+	)
+
+	recipSess := m.sessionRetriever.RetrieveSession(localRecipient)
+	if recipSess == nil {
+		m.logger.Debug("federated evil request recipient offline", "to", localRecipient)
+		m.sendEvilReply(pc, msg.Cookie, 0, 0, wire.ErrorCodeNotLoggedOn)
+		return
+	}
+
+	// Check if the local user has blocked the federated sender
+	rel, err := m.relationshipFetcher.Relationship(ctx, localRecipient, federatedSender)
+	if err != nil {
+		m.logger.Error("failed to check relationship for federation evil request", "err", err)
+		m.sendEvilReply(pc, msg.Cookie, 0, 0, wire.ErrorCodeGeneralFailure)
+		return
+	}
+	if rel.YouBlock {
+		m.logger.Debug("federated evil request blocked by recipient",
+			"from", federatedSender,
+			"to", localRecipient,
+		)
+		m.sendEvilReply(pc, msg.Cookie, 0, 0, wire.ErrorCodeInLocalPermitDeny)
+		return
+	}
+
+	increase := int16(100)
+	if msg.SendAs == 1 {
+		increase = 30
+	}
+
+	newWarning := int32(recipSess.Warning()) + int32(increase)
+	if newWarning > 1000 {
+		newWarning = 1000
+	}
+	recipSess.SetWarning(uint16(newWarning))
+
+	notif := wire.SNAC_0x01_0x10_OServiceEvilNotification{
+		NewEvil: uint16(newWarning),
+	}
+
+	if msg.SendAs == 0 {
+		notif.Snitcher = &struct {
+			wire.TLVUserInfo
+		}{
+			TLVUserInfo: wire.TLVUserInfo{
+				ScreenName: federatedSender.String(),
+			},
+		}
+	}
+
+	m.messageRelayer.RelayToScreenName(ctx, localRecipient, wire.SNACMessage{
+		Frame: wire.SNACFrame{
+			FoodGroup: wire.OService,
+			SubGroup:  wire.OServiceEvilNotification,
+		},
+		Body: notif,
+	})
+
+	m.sendEvilReply(pc, msg.Cookie, uint16(increase), uint16(newWarning), 0)
+
+	m.logger.Debug("applied federated evil request to local user",
+		"from", federatedSender,
+		"to", localRecipient,
+		"newWarning", newWarning,
+	)
+}
+
+// handleFedEvilReply processes an inbound evil reply from a peer, delivering
+// it to the goroutine waiting on the matching cookie.
+func (m *Manager) handleFedEvilReply(pc *PeerConnection, r io.Reader) {
+	var reply wire.SNAC_0x0100_0x0010_FedEvilReply
+	if err := wire.UnmarshalBE(&reply, r); err != nil {
+		m.logger.Error("failed to unmarshal FedEvilReply", "err", err)
+		return
+	}
+
+	m.logger.Debug("recv FedEvilReply",
+		"peer", pc.config.NetworkName,
+		"cookie", reply.Cookie,
+		"delta", reply.EvilDeltaApplied,
+		"newLevel", reply.UpdatedEvilValue,
+		"errorCode", reply.ErrorCode,
+	)
+
+	m.pendingEvilMu.Lock()
+	pending, ok := m.pendingEvil[reply.Cookie]
+	m.pendingEvilMu.Unlock()
+
+	if !ok {
+		m.logger.Warn("received FedEvilReply with unknown cookie",
+			"peer", pc.config.NetworkName,
+			"cookie", reply.Cookie,
+		)
+		return
+	}
+
+	select {
+	case pending.replyCh <- reply:
+	default:
+	}
+}
+
+// sendEvilReply sends a FedEvilReply back to the requesting peer.
+func (m *Manager) sendEvilReply(pc *PeerConnection, cookie uint64, deltaApplied uint16, updatedLevel uint16, errorCode uint16) {
+	select {
+	case pc.sendCh <- wire.SNACMessage{
+		Frame: wire.SNACFrame{
+			FoodGroup: wire.Federation,
+			SubGroup:  wire.FedEvilReply,
+		},
+		Body: wire.SNAC_0x0100_0x0010_FedEvilReply{
+			Cookie:           cookie,
+			EvilDeltaApplied: deltaApplied,
+			UpdatedEvilValue: updatedLevel,
+			ErrorCode:        errorCode,
 		},
 	}:
 	default:

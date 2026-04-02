@@ -482,6 +482,12 @@ func (s ICBMService) EvilRequest(ctx context.Context, instance *state.SessionIns
 		return *newICBMErr(inFrame.RequestID, wire.ErrorCodeNotLoggedOn), nil
 	}
 
+	// If the user is not local to this server, route it via the federation link
+	if s.federationRouter != nil && !identScreenName.IsLocal(s.localNetwork) {
+		s.logger.DebugContext(ctx, "routing evil request to federation", "from", instance.IdentScreenName(), "to", identScreenName, "network", identScreenName.Network())
+		return s.federationRouter.RouteEvil(ctx, instance, inFrame, inBody)
+	}
+
 	recipSess := s.sessionRetriever.RetrieveSession(identScreenName)
 	if recipSess == nil {
 		// target user is offline

@@ -27,6 +27,8 @@ const (
 	FedPresenceSubscribeAck uint16 = 0x000C
 	FedUserInfoQuery        uint16 = 0x000D
 	FedUserInfoReply        uint16 = 0x000E
+	FedEvilRequest          uint16 = 0x000F
+	FedEvilReply            uint16 = 0x0010
 )
 
 //
@@ -139,6 +141,24 @@ type SNAC_0x0100_0x000C_FedPresenceSubscribeAck struct {
 	ScreenName string `oscar:"len_prefix=uint8"`
 	Online     uint8
 	TLVRestBlock
+}
+
+// SNAC_0x0100_0x000F_FedEvilRequest relays a warning (evil) request from a
+// user on the sending server to a user on the receiving server.
+type SNAC_0x0100_0x000F_FedEvilRequest struct {
+	Cookie   uint64
+	FromUser string `oscar:"len_prefix=uint8"`
+	ToUser   string `oscar:"len_prefix=uint8"`
+	SendAs   uint16 // 0 = identified, 1 = anonymous
+}
+
+// SNAC_0x0100_0x0010_FedEvilReply is sent by the remote server in response to
+// a FedEvilRequest, containing the result of the warning operation.
+type SNAC_0x0100_0x0010_FedEvilReply struct {
+	Cookie           uint64
+	EvilDeltaApplied uint16
+	UpdatedEvilValue uint16
+	ErrorCode        uint16 // 0 = success
 }
 
 // SNAC_0x0100_0x000D_FedUserInfoQuery requests profile and/or away message
