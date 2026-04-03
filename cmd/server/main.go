@@ -58,7 +58,24 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := deps.SetupFederation(); err != nil {
+		fmt.Printf("federation setup failed: %s\n", err)
+		os.Exit(1)
+	}
+
 	g, ctx := errgroup.WithContext(ctx)
+
+	// Start federation peer connections and listener if configured.
+	if deps.fedManager != nil {
+		fedMgr := deps.fedManager
+		g.Go(func() error {
+			fedMgr.ConnectToPeers(ctx)
+			return nil
+		})
+	}
+	if deps.fedServer != nil {
+		g.Go(deps.fedServer.ListenAndServe)
+	}
 
 	oscar := OSCAR(deps)
 	g.Go(oscar.ListenAndServe)
@@ -88,6 +105,9 @@ func main() {
 		_ = toc.Shutdown(shutdownCtx)
 		if os.Getenv("ENABLE_WEBAPI") == "1" {
 			_ = webAPI.Shutdown(shutdownCtx)
+		}
+		if deps.fedServer != nil {
+			_ = deps.fedServer.Shutdown(shutdownCtx)
 		}
 	}
 
