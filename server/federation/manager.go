@@ -58,15 +58,20 @@ type Manager struct {
 	mu           sync.RWMutex
 
 	// Local dependencies for handling inbound federation messages.
-	localRelayer      MessageRelayer
-	localRetriever    SessionRetriever
-	localRelFetcher   RelationshipFetcher
-	localFeedbag      FeedbagManager
-	localProfile      ProfileManager
-	remoteStore       *RemoteSessionStore
+	localRelayer        MessageRelayer
+	localRetriever      SessionRetriever
+	localRelFetcher     RelationshipFetcher
+	localFeedbag        FeedbagManager
+	localProfile        ProfileManager
+	remoteStore         *RemoteSessionStore
 	allSessionRetriever interface {
 		AllSessions() []*state.Session
 	}
+
+	// Gossip protocol state for network topology and multi-hop routing.
+	gossip         *GossipState
+	gossipInterval time.Duration
+	maxTTL         uint8
 
 	// Presence subscriptions: localUser -> set of remote subscribers
 	presenceSubs   map[state.IdentScreenName]map[state.IdentScreenName]bool
@@ -92,6 +97,8 @@ func NewManager(
 	localProfile ProfileManager,
 	remoteStore *RemoteSessionStore,
 	logger *slog.Logger,
+	gossipIntervalSec int,
+	maxTTL int,
 ) *Manager {
 	peers := make(map[string]*PeerConnection)
 	for _, cfg := range peerConfigs {
@@ -100,6 +107,18 @@ func NewManager(
 			sendCh: make(chan wire.SNACMessage, sendChanSize),
 		}
 	}
+
+	gossipInterval := defaultGossipInterval
+	if gossipIntervalSec > 0 {
+		gossipInterval = time.Duration(gossipIntervalSec) * time.Second
+	}
+	ttl := uint8(defaultMaxTTL)
+	if maxTTL > 0 && maxTTL <= 255 {
+		ttl = uint8(maxTTL)
+	}
+
+	gs := NewGossipState(localNetwork, logger)
+
 	return &Manager{
 		localNetwork:        localNetwork,
 		peers:               peers,
@@ -112,6 +131,9 @@ func NewManager(
 		localProfile:        localProfile,
 		remoteStore:         remoteStore,
 		logger:              logger,
+		gossip:              gs,
+		gossipInterval:      gossipInterval,
+		maxTTL:              ttl,
 		presenceSubs:        make(map[state.IdentScreenName]map[state.IdentScreenName]bool),
 		pendingUserInfo:     make(map[uint64]*userInfoPendingRequest),
 		pendingEvil:         make(map[uint64]*evilPendingRequest),
@@ -129,18 +151,32 @@ func (m *Manager) LocalNetwork() string {
 
 // RouteToRemote inspects the SNAC message type and routes it to the
 // appropriate federation peer. It translates OSCAR SNACs into the
-// federation wire format before sending.
+// federation wire format before sending. If no direct peer is available,
+// messages are wrapped in a FedForward envelope and routed through
+// intermediate servers using the gossip routing table.
 func (m *Manager) RouteToRemote(ctx context.Context, recipient state.IdentScreenName, msg wire.SNACMessage) error {
 	network := recipient.Network()
 	if network == "" {
 		return fmt.Errorf("not a federated user: %s", recipient)
 	}
 
-	pc, err := m.connectedPeer(network)
+	pc, forwarded, err := m.connectedPeerOrRoute(network)
 	if err != nil {
 		return err
 	}
 
+	if forwarded {
+		// No direct connection — wrap in FedForward for multi-hop transit.
+		// Build the federation SNAC that would normally be sent directly,
+		// then wrap it in a forward envelope.
+		fedMsg, err := m.buildFederationSNAC(pc, recipient, msg)
+		if err != nil {
+			return err
+		}
+		return m.sendForwarded(pc, m.localNetwork, network, fedMsg, m.maxTTL)
+	}
+
+	// Direct connection — send federation SNAC directly (existing behavior).
 	switch {
 	case msg.Frame.FoodGroup == wire.ICBM && msg.Frame.SubGroup == wire.ICBMChannelMsgToClient:
 		return m.routeICBMMessage(pc, recipient, msg)
@@ -157,6 +193,73 @@ func (m *Manager) RouteToRemote(ctx context.Context, recipient state.IdentScreen
 			"subgroup", wire.SubGroupName(msg.Frame.FoodGroup, msg.Frame.SubGroup),
 		)
 		return nil
+	}
+}
+
+// buildFederationSNAC translates an OSCAR SNAC into its federation wire
+// equivalent, suitable for wrapping in a FedForward envelope.
+func (m *Manager) buildFederationSNAC(_ *PeerConnection, recipient state.IdentScreenName, msg wire.SNACMessage) (wire.SNACMessage, error) {
+	switch {
+	case msg.Frame.FoodGroup == wire.ICBM && msg.Frame.SubGroup == wire.ICBMChannelMsgToClient:
+		body, ok := msg.Body.(wire.SNAC_0x04_0x07_ICBMChannelMsgToClient)
+		if !ok {
+			return wire.SNACMessage{}, fmt.Errorf("unexpected body type for ICBMChannelMsgToClient: %T", msg.Body)
+		}
+		fedMsg := wire.SNAC_0x0100_0x0004_FedMessage{
+			Cookie:    body.Cookie,
+			FromUser:  body.TLVUserInfo.ScreenName,
+			ToUser:    recipient.LocalPart().String(),
+			ChannelID: body.ChannelID,
+		}
+		for _, tlv := range body.TLVRestBlock.TLVList {
+			if tlv.Tag == wire.ICBMTLVRequestHostAck {
+				continue
+			}
+			fedMsg.Append(tlv)
+		}
+		return wire.SNACMessage{
+			Frame: wire.SNACFrame{FoodGroup: wire.Federation, SubGroup: wire.FedMessage},
+			Body:  fedMsg,
+		}, nil
+
+	case msg.Frame.FoodGroup == wire.ICBM && msg.Frame.SubGroup == wire.ICBMClientEvent:
+		body, ok := msg.Body.(wire.SNAC_0x04_0x14_ICBMClientEvent)
+		if !ok {
+			return wire.SNACMessage{}, fmt.Errorf("unexpected body type for ICBMClientEvent: %T", msg.Body)
+		}
+		return wire.SNACMessage{
+			Frame: wire.SNACFrame{FoodGroup: wire.Federation, SubGroup: wire.FedTypingEvent},
+			Body: wire.SNAC_0x0100_0x000A_FedTypingEvent{
+				Cookie:    body.Cookie,
+				FromUser:  body.ScreenName,
+				ToUser:    recipient.LocalPart().String(),
+				ChannelID: body.ChannelID,
+				Event:     body.Event,
+			},
+		}, nil
+
+	case msg.Frame.FoodGroup == wire.Buddy && msg.Frame.SubGroup == wire.BuddyArrived:
+		return wire.SNACMessage{
+			Frame: wire.SNACFrame{FoodGroup: wire.Federation, SubGroup: wire.FedPresenceNotify},
+			Body: wire.SNAC_0x0100_0x0009_FedPresenceNotify{
+				ScreenName: recipient.LocalPart().String(),
+				Online:     1,
+			},
+		}, nil
+
+	case msg.Frame.FoodGroup == wire.Buddy && msg.Frame.SubGroup == wire.BuddyDeparted:
+		return wire.SNACMessage{
+			Frame: wire.SNACFrame{FoodGroup: wire.Federation, SubGroup: wire.FedPresenceNotify},
+			Body: wire.SNAC_0x0100_0x0009_FedPresenceNotify{
+				ScreenName: recipient.LocalPart().String(),
+				Online:     0,
+			},
+		}, nil
+
+	default:
+		return wire.SNACMessage{}, fmt.Errorf("unhandled SNAC type for forwarding: %s/%s",
+			wire.FoodGroupName(msg.Frame.FoodGroup),
+			wire.SubGroupName(msg.Frame.FoodGroup, msg.Frame.SubGroup))
 	}
 }
 
@@ -231,18 +334,15 @@ func (m *Manager) sendPresenceNotify(pc *PeerConnection, recipient state.IdentSc
 }
 
 // SubscribePresence requests presence notifications for a remote user.
+// If no direct connection exists, the subscription is forwarded through
+// intermediate servers.
 func (m *Manager) SubscribePresence(_ context.Context, localUser, remoteUser state.IdentScreenName) error {
 	network := remoteUser.Network()
 	if network == "" {
 		return nil
 	}
 
-	pc, err := m.connectedPeer(network)
-	if err != nil {
-		return nil // silently skip if peer not connected; will resubscribe on reconnect
-	}
-
-	return m.trySend(pc, wire.SNACMessage{
+	subMsg := wire.SNACMessage{
 		Frame: wire.SNACFrame{
 			FoodGroup: wire.Federation,
 			SubGroup:  wire.FedPresenceSubscribe,
@@ -251,7 +351,17 @@ func (m *Manager) SubscribePresence(_ context.Context, localUser, remoteUser sta
 			FromUser: localUser.String(),
 			ToUser:   remoteUser.LocalPart().String(),
 		},
-	})
+	}
+
+	pc, forwarded, err := m.connectedPeerOrRoute(network)
+	if err != nil {
+		return nil // silently skip if peer not connected; will resubscribe on reconnect
+	}
+
+	if forwarded {
+		return m.sendForwarded(pc, m.localNetwork, network, subMsg, m.maxTTL)
+	}
+	return m.trySend(pc, subMsg)
 }
 
 // UnsubscribePresence cancels presence notifications for a remote user.
@@ -261,12 +371,7 @@ func (m *Manager) UnsubscribePresence(_ context.Context, localUser, remoteUser s
 		return nil
 	}
 
-	pc, err := m.connectedPeer(network)
-	if err != nil {
-		return nil
-	}
-
-	return m.trySend(pc, wire.SNACMessage{
+	unsubMsg := wire.SNACMessage{
 		Frame: wire.SNACFrame{
 			FoodGroup: wire.Federation,
 			SubGroup:  wire.FedPresenceUnsubscribe,
@@ -275,7 +380,17 @@ func (m *Manager) UnsubscribePresence(_ context.Context, localUser, remoteUser s
 			FromUser: localUser.String(),
 			ToUser:   remoteUser.LocalPart().String(),
 		},
-	})
+	}
+
+	pc, forwarded, err := m.connectedPeerOrRoute(network)
+	if err != nil {
+		return nil
+	}
+
+	if forwarded {
+		return m.sendForwarded(pc, m.localNetwork, network, unsubMsg, m.maxTTL)
+	}
+	return m.trySend(pc, unsubMsg)
 }
 
 // NotifyPresenceToSubscribers notifies all remote peers that have subscribed
@@ -301,29 +416,36 @@ func (m *Manager) NotifyPresenceToSubscribers(_ context.Context, localUser state
 		onlineFlag = 1
 	}
 
+	notifyMsg := wire.SNACMessage{
+		Frame: wire.SNACFrame{
+			FoodGroup: wire.Federation,
+			SubGroup:  wire.FedPresenceNotify,
+		},
+		Body: wire.SNAC_0x0100_0x0009_FedPresenceNotify{
+			ScreenName: localUser.String(),
+			Online:     onlineFlag,
+		},
+	}
+
 	for network := range networkPeers {
-		pc, err := m.connectedPeer(network)
+		pc, forwarded, err := m.connectedPeerOrRoute(network)
 		if err != nil {
 			continue
 		}
-		m.trySend(pc, wire.SNACMessage{
-			Frame: wire.SNACFrame{
-				FoodGroup: wire.Federation,
-				SubGroup:  wire.FedPresenceNotify,
-			},
-			Body: wire.SNAC_0x0100_0x0009_FedPresenceNotify{
-				ScreenName: localUser.String(),
-				Online:     onlineFlag,
-			},
-		})
+		if forwarded {
+			m.sendForwarded(pc, m.localNetwork, network, notifyMsg, m.maxTTL)
+		} else {
+			m.trySend(pc, notifyMsg)
+		}
 	}
 	return nil
 }
 
 // QueryUserInfo queries a remote server for a user's profile/away message.
+// Supports multi-hop forwarding if no direct connection exists.
 func (m *Manager) QueryUserInfo(ctx context.Context, remoteUser state.IdentScreenName, requestType uint32) (*wire.SNAC_0x0100_0x000E_FedUserInfoReply, error) {
 	network := remoteUser.Network()
-	pc, err := m.connectedPeer(network)
+	pc, forwarded, err := m.connectedPeerOrRoute(network)
 	if err != nil {
 		return nil, err
 	}
@@ -342,7 +464,7 @@ func (m *Manager) QueryUserInfo(ctx context.Context, remoteUser state.IdentScree
 		m.pendingUserInfoMu.Unlock()
 	}()
 
-	if err := m.trySend(pc, wire.SNACMessage{
+	queryMsg := wire.SNACMessage{
 		Frame: wire.SNACFrame{
 			FoodGroup: wire.Federation,
 			SubGroup:  wire.FedUserInfoQuery,
@@ -352,7 +474,14 @@ func (m *Manager) QueryUserInfo(ctx context.Context, remoteUser state.IdentScree
 			ToUser: remoteUser.LocalPart().String(),
 			Type:   uint16(requestType),
 		},
-	}); err != nil {
+	}
+
+	if forwarded {
+		err = m.sendForwarded(pc, m.localNetwork, network, queryMsg, m.maxTTL)
+	} else {
+		err = m.trySend(pc, queryMsg)
+	}
+	if err != nil {
 		return nil, err
 	}
 
@@ -373,7 +502,26 @@ func (m *Manager) QueryUserInfo(ctx context.Context, remoteUser state.IdentScree
 // ConnectToPeers starts outbound connections to all configured peers.
 // Blocks until ctx is cancelled.
 func (m *Manager) ConnectToPeers(ctx context.Context) {
+	// Initialize gossip state with configured direct peers.
+	peerNames := make([]string, 0, len(m.peerConfigs))
+	for _, cfg := range m.peerConfigs {
+		peerNames = append(peerNames, cfg.NetworkName)
+	}
+	m.gossip.SetDirectPeers(peerNames)
+
 	var wg sync.WaitGroup
+
+	// Start the gossip protocol loop.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		m.gossip.GossipLoop(ctx, m.gossipInterval,
+			m.sendGossipDigest,
+			m.connectedPeerNames,
+			m.isDirectPeerConnected,
+		)
+	}()
+
 	for _, pc := range m.peers {
 		wg.Add(1)
 		go func(pc *PeerConnection) {
@@ -621,6 +769,14 @@ func (m *Manager) handleInboundSNAC(ctx context.Context, pc *PeerConnection, pay
 	case wire.FedEvilReply:
 		m.handleFedEvilReply(buf)
 	case wire.FedKeepAlive:
+	case wire.FedGossipDigest:
+		m.handleFedGossipDigest(ctx, pc, buf)
+	case wire.FedGossipDigestAck:
+		m.handleFedGossipDigestAck(ctx, pc, buf)
+	case wire.FedGossipDigestAck2:
+		m.handleFedGossipDigestAck2(buf)
+	case wire.FedForward:
+		m.handleFedForward(ctx, pc, buf)
 	}
 }
 
@@ -1105,6 +1261,128 @@ func (m *Manager) resubscribePresence(ctx context.Context, pc *PeerConnection) {
 			}
 		}
 	}
+}
+
+//
+// Gossip protocol handlers
+//
+
+func (m *Manager) handleFedGossipDigest(_ context.Context, pc *PeerConnection, r io.Reader) {
+	var digest wire.SNAC_0x0100_0x0011_FedGossipDigest
+	if err := wire.UnmarshalBE(&digest, r); err != nil {
+		m.logger.Error("unmarshal FedGossipDigest", "err", err)
+		return
+	}
+
+	updates, needFrom := m.gossip.HandleDigest(digest)
+
+	ack := wire.SNAC_0x0100_0x0012_FedGossipDigestAck{
+		Updates:  updates,
+		NeedFrom: needFrom,
+	}
+
+	m.trySend(pc, wire.SNACMessage{
+		Frame: wire.SNACFrame{
+			FoodGroup: wire.Federation,
+			SubGroup:  wire.FedGossipDigestAck,
+		},
+		Body: ack,
+	})
+}
+
+func (m *Manager) handleFedGossipDigestAck(_ context.Context, pc *PeerConnection, r io.Reader) {
+	var ack wire.SNAC_0x0100_0x0012_FedGossipDigestAck
+	if err := wire.UnmarshalBE(&ack, r); err != nil {
+		m.logger.Error("unmarshal FedGossipDigestAck", "err", err)
+		return
+	}
+
+	// Merge the updates the responder sent us.
+	m.gossip.MergeUpdates(ack.Updates)
+
+	// Send back state for entries the responder needs.
+	if len(ack.NeedFrom) > 0 {
+		states := m.gossip.GetStatesForDigests(ack.NeedFrom)
+		if len(states) > 0 {
+			m.trySend(pc, wire.SNACMessage{
+				Frame: wire.SNACFrame{
+					FoodGroup: wire.Federation,
+					SubGroup:  wire.FedGossipDigestAck2,
+				},
+				Body: wire.SNAC_0x0100_0x0013_FedGossipDigestAck2{
+					Updates: states,
+				},
+			})
+		}
+	}
+}
+
+func (m *Manager) handleFedGossipDigestAck2(r io.Reader) {
+	var ack2 wire.SNAC_0x0100_0x0013_FedGossipDigestAck2
+	if err := wire.UnmarshalBE(&ack2, r); err != nil {
+		m.logger.Error("unmarshal FedGossipDigestAck2", "err", err)
+		return
+	}
+
+	m.gossip.MergeUpdates(ack2.Updates)
+}
+
+// sendGossipDigest sends a gossip digest to a specific peer. Used as a
+// callback from the GossipLoop.
+func (m *Manager) sendGossipDigest(peerNetwork string, digest wire.SNAC_0x0100_0x0011_FedGossipDigest) {
+	m.mu.RLock()
+	pc, ok := m.peers[peerNetwork]
+	m.mu.RUnlock()
+	if !ok {
+		return
+	}
+
+	pc.mu.Lock()
+	connected := pc.connected
+	pc.mu.Unlock()
+	if !connected {
+		return
+	}
+
+	m.trySend(pc, wire.SNACMessage{
+		Frame: wire.SNACFrame{
+			FoodGroup: wire.Federation,
+			SubGroup:  wire.FedGossipDigest,
+		},
+		Body: digest,
+	})
+}
+
+// connectedPeerNames returns the network names of all currently connected
+// direct peers. Used by the gossip loop for peer selection.
+func (m *Manager) connectedPeerNames() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var names []string
+	for name, pc := range m.peers {
+		pc.mu.Lock()
+		connected := pc.connected
+		pc.mu.Unlock()
+		if connected {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// isDirectPeerConnected returns true if we have an active connection to the
+// given network. Used by gossip failure detection.
+func (m *Manager) isDirectPeerConnected(network string) bool {
+	m.mu.RLock()
+	pc, ok := m.peers[network]
+	m.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	return pc.connected
 }
 
 func (m *Manager) connectedPeer(network string) (*PeerConnection, error) {

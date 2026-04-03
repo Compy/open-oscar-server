@@ -147,6 +147,8 @@ func (c *Container) SetupFederation() error {
 		c.sqLiteUserStore,        // local profile
 		remoteStore,
 		logger,
+		c.cfg.FederationGossipInterval,
+		c.cfg.FederationMaxTTL,
 	)
 
 	c.messageRelayer = federation.NewFederatedMessageRelayer(
@@ -487,18 +489,18 @@ func MgmtAPI(deps Container) *http.Server {
 		deps.sqLiteUserStore,        // userManager
 		deps.inMemorySessionManager, // sessionRetriever (mgmt API needs AllSessions)
 		mgmtBuddyService,
-		deps.sqLiteUserStore,        // chatRoomRetriever
-		deps.sqLiteUserStore,        // chatRoomCreator
-		deps.sqLiteUserStore,        // chatRoomDeleter
-		deps.chatSessionManager,     // chatSessionRetriever
-		deps.sqLiteUserStore,        // directoryManager
-		deps.messageRelayer,         // messageRelayer
-		deps.sqLiteUserStore,        // bartAssetManager
-		deps.sqLiteUserStore,        // feedbagRetriever
-		deps.sqLiteUserStore,        // feedbagManager
-		deps.sqLiteUserStore,        // accountManager
-		deps.sqLiteUserStore,        // profileRetriever
-		deps.sqLiteUserStore,        // webAPIKeyManager
+		deps.sqLiteUserStore,    // chatRoomRetriever
+		deps.sqLiteUserStore,    // chatRoomCreator
+		deps.sqLiteUserStore,    // chatRoomDeleter
+		deps.chatSessionManager, // chatSessionRetriever
+		deps.sqLiteUserStore,    // directoryManager
+		deps.messageRelayer,     // messageRelayer
+		deps.sqLiteUserStore,    // bartAssetManager
+		deps.sqLiteUserStore,    // feedbagRetriever
+		deps.sqLiteUserStore,    // feedbagManager
+		deps.sqLiteUserStore,    // accountManager
+		deps.sqLiteUserStore,    // profileRetriever
+		deps.sqLiteUserStore,    // webAPIKeyManager
 		state.NewAccountCreator(deps.sqLiteUserStore.InsertUser),
 		logger,
 	)

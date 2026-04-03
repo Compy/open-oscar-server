@@ -56,6 +56,9 @@ type Config struct {
 	FederationNetworkName string   `envconfig:"FEDERATION_NETWORK_NAME" required:"false" description:"Unique network name for this server instance used in federation. When set, enables federation support. Users on federated servers are addressed as screenname@networkname (e.g., user@retra.im)."`
 	FederationListener    string   `envconfig:"FEDERATION_LISTENER" required:"false" description:"Network listener address for incoming federation peer connections.\n\nFormat: HOST:PORT\n\nExample: 0.0.0.0:5195"`
 	FederationPeers       []string `envconfig:"FEDERATION_PEERS" required:"false" description:"Comma-separated list of federation peer definitions.\n\nFormat: NAME@HOST:PORT:SECRET\n\nExample: chivanet.org@peering.chivanet.org:5195:mysharedsecret"`
+
+	FederationGossipInterval int `envconfig:"FEDERATION_GOSSIP_INTERVAL" required:"false" basic:"2" ssl:"2" description:"Interval in seconds between gossip rounds for federation state synchronization. Lower values converge faster but generate more traffic."`
+	FederationMaxTTL         int `envconfig:"FEDERATION_MAX_TTL" required:"false" basic:"10" ssl:"10" description:"Maximum hop count for forwarded federation messages. Messages exceeding this TTL are dropped to prevent routing loops."`
 }
 
 // FederationPeerConfig holds the parsed configuration for a single federation peer.

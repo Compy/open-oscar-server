@@ -26,6 +26,7 @@ var foodGroupName = map[uint16]string{
 	UnnamedFG24: "UnnamedFG24",
 	MDir:        "MDir",
 	ARS:         "ARS",
+	Federation:  "Federation",
 }
 
 // FoodGroupName gets the string name of a food group. It returns "unknown" if
@@ -305,6 +306,28 @@ var subGroupName = map[uint16]map[uint16]string{
 		StatsSetMinReportInterval: "StatsSetMinReportInterval",
 		StatsReportEvents:         "StatsReportEvents",
 		StatsReportAck:            "StatsReportAck",
+	},
+	Federation: {
+		FedAuthRequest:          "FedAuthRequest",
+		FedAuthResponse:         "FedAuthResponse",
+		FedAuthResult:           "FedAuthResult",
+		FedMessage:              "FedMessage",
+		FedMessageAck:           "FedMessageAck",
+		FedMessageErr:           "FedMessageErr",
+		FedPresenceSubscribe:    "FedPresenceSubscribe",
+		FedPresenceUnsubscribe:  "FedPresenceUnsubscribe",
+		FedPresenceNotify:       "FedPresenceNotify",
+		FedTypingEvent:          "FedTypingEvent",
+		FedKeepAlive:            "FedKeepAlive",
+		FedPresenceSubscribeAck: "FedPresenceSubscribeAck",
+		FedUserInfoQuery:        "FedUserInfoQuery",
+		FedUserInfoReply:        "FedUserInfoReply",
+		FedEvilRequest:          "FedEvilRequest",
+		FedEvilReply:            "FedEvilReply",
+		FedGossipDigest:         "FedGossipDigest",
+		FedGossipDigestAck:      "FedGossipDigestAck",
+		FedGossipDigestAck2:     "FedGossipDigestAck2",
+		FedForward:              "FedForward",
 	},
 }
 

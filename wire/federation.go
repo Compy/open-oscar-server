@@ -29,6 +29,10 @@ const (
 	FedUserInfoReply        uint16 = 0x000E
 	FedEvilRequest          uint16 = 0x000F
 	FedEvilReply            uint16 = 0x0010
+	FedGossipDigest         uint16 = 0x0011
+	FedGossipDigestAck      uint16 = 0x0012
+	FedGossipDigestAck2     uint16 = 0x0013
+	FedForward              uint16 = 0x0014
 )
 
 //
@@ -176,4 +180,66 @@ type SNAC_0x0100_0x0010_FedEvilReply struct {
 	EvilDeltaApplied uint16
 	UpdatedEvilValue uint16
 	ErrorCode        uint16 // 0 = success
+}
+
+//
+// Gossip protocol messages
+//
+
+// FedNetworkDigest is a compact summary of a known network's state version,
+// used in gossip digest exchanges.
+type FedNetworkDigest struct {
+	NetworkName string `oscar:"len_prefix=uint16"`
+	MaxVersion  uint64
+	IsAlive     uint8 // 1 = alive, 0 = suspected dead
+}
+
+// FedNetworkState is the full state of a known network, exchanged during
+// gossip reconciliation.
+type FedNetworkState struct {
+	NetworkName string `oscar:"len_prefix=uint16"`
+	Version     uint64
+	IsAlive     uint8
+	PeerList    []FedNetworkPeer `oscar:"count_prefix=uint16"`
+	UserCount   uint32
+}
+
+// FedNetworkPeer is a single entry in a network's peer list.
+type FedNetworkPeer struct {
+	NetworkName string `oscar:"len_prefix=uint16"`
+}
+
+// SNAC_0x0100_0x0011_FedGossipDigest is sent periodically to random peers.
+// Contains a compact version vector of all known networks.
+type SNAC_0x0100_0x0011_FedGossipDigest struct {
+	Generation uint64
+	Digests    []FedNetworkDigest `oscar:"count_prefix=uint16"`
+}
+
+// SNAC_0x0100_0x0012_FedGossipDigestAck is sent in response to a gossip
+// digest. Contains full state for entries where the digest sender is behind,
+// and a list of entries where the responder needs updates.
+type SNAC_0x0100_0x0012_FedGossipDigestAck struct {
+	Updates  []FedNetworkState  `oscar:"count_prefix=uint16"`
+	NeedFrom []FedNetworkDigest `oscar:"count_prefix=uint16"`
+}
+
+// SNAC_0x0100_0x0013_FedGossipDigestAck2 completes the three-way gossip
+// handshake. Contains state for entries the original responder needed.
+type SNAC_0x0100_0x0013_FedGossipDigestAck2 struct {
+	Updates []FedNetworkState `oscar:"count_prefix=uint16"`
+}
+
+//
+// Multi-hop forwarding
+//
+
+// SNAC_0x0100_0x0014_FedForward wraps any federation SNAC for multi-hop
+// transit through intermediate servers. The InnerSNAC field contains a
+// serialized SNACFrame + body that is unwrapped at the destination.
+type SNAC_0x0100_0x0014_FedForward struct {
+	OriginNetwork string `oscar:"len_prefix=uint16"`
+	TargetNetwork string `oscar:"len_prefix=uint16"`
+	TTL           uint8
+	InnerSNAC     []byte `oscar:"len_prefix=uint16"`
 }

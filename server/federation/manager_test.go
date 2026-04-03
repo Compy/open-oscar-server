@@ -32,6 +32,8 @@ func newTestManager(t *testing.T, peerNetwork string) (*Manager, *PeerConnection
 		&mockProfileManager{},
 		NewRemoteSessionStore(),
 		slog.Default(),
+		0, // gossipIntervalSec (use default)
+		0, // maxTTL (use default)
 	)
 	// Mark the peer as connected so sends don't fail.
 	pc := mgr.peers[peerNetwork]
