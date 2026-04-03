@@ -15,6 +15,7 @@ import (
 
 	"github.com/mk6i/open-oscar-server/config"
 	"github.com/mk6i/open-oscar-server/foodgroup"
+	"github.com/mk6i/open-oscar-server/server/federation"
 	"github.com/mk6i/open-oscar-server/server/http"
 	"github.com/mk6i/open-oscar-server/server/kerberos"
 	"github.com/mk6i/open-oscar-server/server/oscar"
@@ -39,6 +40,18 @@ type Container struct {
 	sqLiteUserStore        *state.SQLiteUserStore
 	webAPISessionManager   *state.WebAPISessionManager
 	Listeners              []config.Listener
+
+	// Interface fields default to concrete types but can be swapped for
+	// federation-aware decorators.
+	messageRelayer      foodgroup.MessageRelayer
+	sessionRetriever    foodgroup.SessionRetriever
+	relationshipFetcher foodgroup.RelationshipFetcher
+	feedbagManager      foodgroup.FeedbagManager
+	profileManager      foodgroup.ProfileManager
+
+	// Federation (nil when federation is disabled)
+	fedManager *federation.Manager
+	fedServer  *federation.Server
 }
 
 // MakeCommonDeps creates common dependencies used by the food group services.
@@ -80,20 +93,97 @@ func MakeCommonDeps() (Container, error) {
 	c.rateLimitClasses = wire.DefaultRateLimitClasses()
 	c.snacRateLimits = wire.DefaultSNACRateLimits()
 
+	// Set interface defaults to concrete types. These can be swapped for
+	// federation-aware decorators via SetupFederation().
+	c.messageRelayer = c.inMemorySessionManager
+	c.sessionRetriever = c.inMemorySessionManager
+	c.relationshipFetcher = c.sqLiteUserStore
+	c.feedbagManager = c.sqLiteUserStore
+	c.profileManager = c.sqLiteUserStore
+
 	// ICBM svc is a common dep because OSCAR and TOC need to share convo history state.
 	c.icbmSvc = foodgroup.NewICBMService(
 		c.sqLiteUserStore,
-		c.inMemorySessionManager,
+		c.messageRelayer,
 		c.sqLiteUserStore,
+		c.relationshipFetcher,
+		c.sessionRetriever,
 		c.sqLiteUserStore,
-		c.inMemorySessionManager,
-		c.sqLiteUserStore,
-		c.sqLiteUserStore,
+		c.feedbagManager,
 		c.snacRateLimits,
 		c.logger,
 	)
 
 	return c, nil
+}
+
+// SetupFederation wraps the interface fields with federation-aware decorators
+// if federation is enabled in the config. Must be called after MakeCommonDeps
+// and before constructing services that use the interface fields.
+//
+// Note: this rebuilds the ICBM service with the wrapped interfaces since it
+// was already created in MakeCommonDeps.
+func (c *Container) SetupFederation() error {
+	if !c.cfg.FederationEnabled() {
+		return nil
+	}
+
+	peerConfigs, err := c.cfg.ParseFederationPeers()
+	if err != nil {
+		return fmt.Errorf("parse federation peers: %w", err)
+	}
+
+	logger := c.logger.With("svc", "federation")
+	remoteStore := federation.NewRemoteSessionStore()
+
+	c.fedManager = federation.NewManager(
+		c.cfg.FederationNetworkName,
+		peerConfigs,
+		c.inMemorySessionManager, // local relayer for inbound federation messages
+		c.inMemorySessionManager, // local session retriever
+		c.inMemorySessionManager, // all sessions retriever
+		c.sqLiteUserStore,        // local relationship fetcher
+		c.sqLiteUserStore,        // local feedbag
+		c.sqLiteUserStore,        // local profile
+		remoteStore,
+		logger,
+	)
+
+	c.messageRelayer = federation.NewFederatedMessageRelayer(
+		c.inMemorySessionManager, c.fedManager, c.cfg.FederationNetworkName, logger)
+	c.sessionRetriever = federation.NewFederatedSessionRetriever(
+		c.inMemorySessionManager, remoteStore, c.cfg.FederationNetworkName)
+	c.relationshipFetcher = federation.NewFederatedRelationshipFetcher(
+		c.sqLiteUserStore, c.cfg.FederationNetworkName)
+	c.feedbagManager = federation.NewFederatedFeedbagManager(
+		c.sqLiteUserStore, c.fedManager, c.cfg.FederationNetworkName, logger)
+	c.profileManager = federation.NewFederatedProfileManager(
+		c.sqLiteUserStore, c.fedManager, remoteStore, c.cfg.FederationNetworkName, logger)
+
+	// Rebuild ICBM service with wrapped interfaces
+	c.icbmSvc = foodgroup.NewICBMService(
+		c.sqLiteUserStore,
+		c.messageRelayer,
+		c.sqLiteUserStore,
+		c.relationshipFetcher,
+		c.sessionRetriever,
+		c.sqLiteUserStore,
+		c.feedbagManager,
+		c.snacRateLimits,
+		c.logger,
+	)
+
+	// Create federation listener server if configured
+	if c.cfg.FederationListener != "" {
+		c.fedServer = federation.NewServer(c.cfg.FederationListener, c.fedManager, logger)
+	}
+
+	logger.Info("federation enabled",
+		"network_name", c.cfg.FederationNetworkName,
+		"peer_count", len(peerConfigs),
+	)
+
+	return nil
 }
 
 func validateConfigMigration() error {
@@ -221,9 +311,9 @@ func OSCAR(deps Container) *oscar.Server {
 	adminService := foodgroup.NewAdminService(
 		deps.sqLiteUserStore,
 		deps.sqLiteUserStore,
-		deps.sqLiteUserStore,
-		deps.inMemorySessionManager,
-		deps.inMemorySessionManager,
+		deps.relationshipFetcher,
+		deps.messageRelayer,
+		deps.sessionRetriever,
 		deps.logger,
 	)
 	authService := foodgroup.NewAuthService(
@@ -243,62 +333,62 @@ func OSCAR(deps Container) *oscar.Server {
 	bartService := foodgroup.NewBARTService(
 		logger,
 		deps.sqLiteUserStore,
-		deps.inMemorySessionManager,
-		deps.sqLiteUserStore,
-		deps.inMemorySessionManager,
+		deps.messageRelayer,
+		deps.relationshipFetcher,
+		deps.sessionRetriever,
 	)
 	buddyService := foodgroup.NewBuddyService(
-		deps.inMemorySessionManager,
+		deps.messageRelayer,
 		deps.sqLiteUserStore,
-		deps.sqLiteUserStore,
-		deps.inMemorySessionManager,
+		deps.relationshipFetcher,
+		deps.sessionRetriever,
 		deps.sqLiteUserStore,
 	)
 	chatService := foodgroup.NewChatService(deps.chatSessionManager)
 	chatNavService := foodgroup.NewChatNavService(logger, deps.sqLiteUserStore)
 	feedbagService := foodgroup.NewFeedbagService(
 		logger,
-		deps.inMemorySessionManager,
+		deps.messageRelayer,
+		deps.feedbagManager,
 		deps.sqLiteUserStore,
-		deps.sqLiteUserStore,
-		deps.sqLiteUserStore,
-		deps.inMemorySessionManager,
+		deps.relationshipFetcher,
+		deps.sessionRetriever,
 	)
 	permitDenyService := foodgroup.NewPermitDenyService(
 		deps.sqLiteUserStore,
+		deps.relationshipFetcher,
 		deps.sqLiteUserStore,
-		deps.sqLiteUserStore,
-		deps.inMemorySessionManager,
-		deps.inMemorySessionManager,
+		deps.messageRelayer,
+		deps.sessionRetriever,
 	)
 	icqService := foodgroup.NewICQService(
-		deps.inMemorySessionManager,
+		deps.messageRelayer,
 		deps.sqLiteUserStore,
 		deps.sqLiteUserStore,
 		logger,
-		deps.inMemorySessionManager,
+		deps.sessionRetriever,
 		deps.sqLiteUserStore,
 	)
 	locateService := foodgroup.NewLocateService(
 		deps.sqLiteUserStore,
-		deps.inMemorySessionManager,
-		deps.sqLiteUserStore,
-		deps.sqLiteUserStore,
-		deps.inMemorySessionManager,
+		deps.messageRelayer,
+		deps.profileManager,
+		deps.relationshipFetcher,
+		deps.sessionRetriever,
 		deps.sqLiteUserStore,
 	)
 	oServiceService := foodgroup.NewOServiceService(
 		deps.cfg,
-		deps.inMemorySessionManager,
+		deps.messageRelayer,
 		logger,
 		deps.hmacCookieBaker,
 		deps.sqLiteUserStore,
-		deps.sqLiteUserStore,
-		deps.inMemorySessionManager,
+		deps.relationshipFetcher,
+		deps.sessionRetriever,
 		deps.sqLiteUserStore,
 		deps.snacRateLimits,
 		deps.chatSessionManager,
-		deps.sqLiteUserStore,
+		deps.profileManager,
 		deps.sqLiteUserStore,
 	)
 	userLookupService := foodgroup.NewUserLookupService(deps.sqLiteUserStore)
@@ -309,11 +399,23 @@ func OSCAR(deps Container) *oscar.Server {
 		panic(err)
 	}
 
+	// Wrap DepartureNotifier and BuddyListRegistry for federation if enabled.
+	var departureNotifier oscar.DepartureNotifier = buddyService
+	var buddyListRegistry oscar.BuddyListRegistry = deps.sqLiteUserStore
+	if deps.fedManager != nil {
+		fedLogger := deps.logger.With("svc", "federation")
+		departureNotifier = federation.NewFederatedDepartureNotifier(
+			buddyService, deps.fedManager, deps.cfg.FederationNetworkName, fedLogger)
+		buddyListRegistry = federation.NewFederatedBuddyListRegistry(
+			deps.sqLiteUserStore, deps.fedManager, deps.sqLiteUserStore,
+			deps.cfg.FederationNetworkName, fedLogger)
+	}
+
 	return oscar.NewServer(
 		authService,
-		deps.sqLiteUserStore,
+		buddyListRegistry,
 		deps.chatSessionManager,
-		buddyService,
+		departureNotifier,
 		logger,
 		oServiceService,
 		oscar.Handler{
@@ -372,25 +474,25 @@ func MgmtAPI(deps Container) *http.Server {
 		Date:    date,
 	}
 	logger := deps.logger.With("svc", "API")
-	buddyService := foodgroup.NewBuddyService(
-		deps.inMemorySessionManager,
+	mgmtBuddyService := foodgroup.NewBuddyService(
+		deps.messageRelayer,
 		deps.sqLiteUserStore,
-		deps.sqLiteUserStore,
-		deps.inMemorySessionManager,
+		deps.relationshipFetcher,
+		deps.sessionRetriever,
 		deps.sqLiteUserStore,
 	)
 	return http.NewManagementAPI(
 		bld,
 		deps.cfg.APIListener,
 		deps.sqLiteUserStore,        // userManager
-		deps.inMemorySessionManager, // sessionRetriever
-		buddyService,
+		deps.inMemorySessionManager, // sessionRetriever (mgmt API needs AllSessions)
+		mgmtBuddyService,
 		deps.sqLiteUserStore,        // chatRoomRetriever
 		deps.sqLiteUserStore,        // chatRoomCreator
 		deps.sqLiteUserStore,        // chatRoomDeleter
 		deps.chatSessionManager,     // chatSessionRetriever
 		deps.sqLiteUserStore,        // directoryManager
-		deps.inMemorySessionManager, // messageRelayer
+		deps.messageRelayer,         // messageRelayer
 		deps.sqLiteUserStore,        // bartAssetManager
 		deps.sqLiteUserStore,        // feedbagRetriever
 		deps.sqLiteUserStore,        // feedbagManager
@@ -413,9 +515,9 @@ func TOC(deps Container) *toc.Server {
 			AdminService: foodgroup.NewAdminService(
 				deps.sqLiteUserStore,
 				deps.sqLiteUserStore,
-				deps.sqLiteUserStore,
-				deps.inMemorySessionManager,
-				deps.inMemorySessionManager,
+				deps.relationshipFetcher,
+				deps.messageRelayer,
+				deps.sessionRetriever,
 				deps.logger,
 			),
 			AuthService: foodgroup.NewAuthService(
@@ -434,10 +536,10 @@ func TOC(deps Container) *toc.Server {
 			),
 			BuddyListRegistry: deps.sqLiteUserStore,
 			BuddyService: foodgroup.NewBuddyService(
-				deps.inMemorySessionManager,
+				deps.messageRelayer,
 				deps.sqLiteUserStore,
-				deps.sqLiteUserStore,
-				deps.inMemorySessionManager,
+				deps.relationshipFetcher,
+				deps.sessionRetriever,
 				deps.sqLiteUserStore,
 			),
 			ChatSessionManager: deps.chatSessionManager,
@@ -446,33 +548,33 @@ func TOC(deps Container) *toc.Server {
 			ICBMService:        deps.icbmSvc,
 			LocateService: foodgroup.NewLocateService(
 				deps.sqLiteUserStore,
-				deps.inMemorySessionManager,
-				deps.sqLiteUserStore,
-				deps.sqLiteUserStore,
-				deps.inMemorySessionManager,
+				deps.messageRelayer,
+				deps.profileManager,
+				deps.relationshipFetcher,
+				deps.sessionRetriever,
 				deps.sqLiteUserStore,
 			),
 			Logger: logger,
 			OServiceService: foodgroup.NewOServiceService(
 				deps.cfg,
-				deps.inMemorySessionManager,
+				deps.messageRelayer,
 				logger,
 				deps.hmacCookieBaker,
 				deps.sqLiteUserStore,
-				deps.sqLiteUserStore,
-				deps.inMemorySessionManager,
+				deps.relationshipFetcher,
+				deps.sessionRetriever,
 				deps.sqLiteUserStore,
 				deps.snacRateLimits,
 				deps.chatSessionManager,
-				deps.sqLiteUserStore,
+				deps.profileManager,
 				deps.sqLiteUserStore,
 			),
 			PermitDenyService: foodgroup.NewPermitDenyService(
 				deps.sqLiteUserStore,
+				deps.relationshipFetcher,
 				deps.sqLiteUserStore,
-				deps.sqLiteUserStore,
-				deps.inMemorySessionManager,
-				deps.inMemorySessionManager,
+				deps.messageRelayer,
+				deps.sessionRetriever,
 			),
 			TOCConfigStore: deps.sqLiteUserStore,
 			ChatService:    foodgroup.NewChatService(deps.chatSessionManager),
@@ -480,11 +582,11 @@ func TOC(deps Container) *toc.Server {
 			FeedbagManager: deps.sqLiteUserStore,
 			FeedbagService: foodgroup.NewFeedbagService(
 				logger,
-				deps.inMemorySessionManager,
+				deps.messageRelayer,
+				deps.feedbagManager,
 				deps.sqLiteUserStore,
-				deps.sqLiteUserStore,
-				deps.sqLiteUserStore,
-				deps.inMemorySessionManager,
+				deps.relationshipFetcher,
+				deps.sessionRetriever,
 			),
 			SNACRateLimits:    deps.snacRateLimits,
 			HTTPIPRateLimiter: toc.NewIPRateLimiter(rate.Every(1*time.Minute), 10, 1*time.Minute),
@@ -515,10 +617,10 @@ func WebAPI(deps Container) *webapi.Server {
 
 	// Create the OSCAR buddy broadcaster for WebAPI to use
 	oscarBuddyBroadcaster := foodgroup.NewBuddyService(
-		deps.inMemorySessionManager,
+		deps.messageRelayer,
 		deps.sqLiteUserStore,
-		deps.sqLiteUserStore,
-		deps.inMemorySessionManager,
+		deps.relationshipFetcher,
+		deps.sessionRetriever,
 		deps.sqLiteUserStore,
 	)
 
@@ -526,9 +628,9 @@ func WebAPI(deps Container) *webapi.Server {
 		AdminService: foodgroup.NewAdminService(
 			deps.sqLiteUserStore,
 			deps.sqLiteUserStore,
-			deps.sqLiteUserStore,
-			deps.inMemorySessionManager,
-			deps.inMemorySessionManager,
+			deps.relationshipFetcher,
+			deps.messageRelayer,
+			deps.sessionRetriever,
 			deps.logger,
 		),
 		AuthService: foodgroup.NewAuthService(
@@ -547,10 +649,10 @@ func WebAPI(deps Container) *webapi.Server {
 		),
 		BuddyListRegistry: deps.sqLiteUserStore,
 		BuddyService: foodgroup.NewBuddyService(
-			deps.inMemorySessionManager,
+			deps.messageRelayer,
 			deps.sqLiteUserStore,
-			deps.sqLiteUserStore,
-			deps.inMemorySessionManager,
+			deps.relationshipFetcher,
+			deps.sessionRetriever,
 			deps.sqLiteUserStore,
 		),
 		CookieBaker:      deps.hmacCookieBaker,
@@ -558,33 +660,33 @@ func WebAPI(deps Container) *webapi.Server {
 		ICBMService:      deps.icbmSvc,
 		LocateService: foodgroup.NewLocateService(
 			deps.sqLiteUserStore,
-			deps.inMemorySessionManager,
-			deps.sqLiteUserStore,
-			deps.sqLiteUserStore,
-			deps.inMemorySessionManager,
+			deps.messageRelayer,
+			deps.profileManager,
+			deps.relationshipFetcher,
+			deps.sessionRetriever,
 			deps.sqLiteUserStore,
 		),
 		Logger: logger,
 		OServiceService: foodgroup.NewOServiceService(
 			deps.cfg,
-			deps.inMemorySessionManager,
+			deps.messageRelayer,
 			logger,
 			deps.hmacCookieBaker,
 			deps.sqLiteUserStore,
-			deps.sqLiteUserStore,
-			deps.inMemorySessionManager,
+			deps.relationshipFetcher,
+			deps.sessionRetriever,
 			deps.sqLiteUserStore,
 			deps.snacRateLimits,
 			deps.chatSessionManager,
-			deps.sqLiteUserStore,
+			deps.profileManager,
 			deps.sqLiteUserStore,
 		),
 		PermitDenyService: foodgroup.NewPermitDenyService(
 			deps.sqLiteUserStore,
+			deps.relationshipFetcher,
 			deps.sqLiteUserStore,
-			deps.sqLiteUserStore,
-			deps.inMemorySessionManager,
-			deps.inMemorySessionManager,
+			deps.messageRelayer,
+			deps.sessionRetriever,
 		),
 		TOCConfigStore: deps.sqLiteUserStore,
 		ChatService:    foodgroup.NewChatService(deps.chatSessionManager),
@@ -595,11 +697,11 @@ func WebAPI(deps Container) *webapi.Server {
 		FeedbagRetriever: feedbagAdapter,
 		FeedbagManager:   feedbagAdapter,
 		// Phase 2 additions
-		MessageRelayer:        deps.inMemorySessionManager,
+		MessageRelayer:        deps.messageRelayer,
 		OfflineMessageManager: deps.sqLiteUserStore,
 		BuddyBroadcaster:      oscarBuddyBroadcaster,
-		ProfileManager:        deps.sqLiteUserStore,
-		RelationshipFetcher:   deps.sqLiteUserStore,
+		ProfileManager:        deps.profileManager,
+		RelationshipFetcher:   deps.relationshipFetcher,
 		// Authentication support
 		UserManager: deps.sqLiteUserStore,
 		TokenStore:  deps.sqLiteUserStore.NewWebAPITokenStore(),
