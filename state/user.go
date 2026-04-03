@@ -43,11 +43,55 @@ func (i IdentScreenName) UIN() uint32 {
 	return uint32(v)
 }
 
-// NewIdentScreenName creates a new IdentScreenName.
+// NewIdentScreenName creates a new IdentScreenName. If the screen name contains
+// an '@' delimiter (for federation), only the local part is normalized.
 func NewIdentScreenName(screenName string) IdentScreenName {
+	if atIdx := strings.LastIndex(screenName, "@"); atIdx >= 0 {
+		localPart := screenName[:atIdx]
+		network := screenName[atIdx+1:]
+		localPart = strings.ReplaceAll(localPart, " ", "")
+		localPart = strings.ToLower(localPart)
+		network = strings.ToLower(network)
+		return IdentScreenName{screenName: localPart + "@" + network}
+	}
 	str := strings.ReplaceAll(screenName, " ", "")
 	str = strings.ToLower(str)
 	return IdentScreenName{screenName: str}
+}
+
+// Network returns the network portion of a federated screen name (after '@'),
+// or an empty string if the screen name is local.
+func (i IdentScreenName) Network() string {
+	if atIdx := strings.LastIndex(i.screenName, "@"); atIdx >= 0 {
+		return i.screenName[atIdx+1:]
+	}
+	return ""
+}
+
+// LocalPart returns the user portion of the screen name, stripping any @network
+// suffix.
+func (i IdentScreenName) LocalPart() IdentScreenName {
+	if atIdx := strings.LastIndex(i.screenName, "@"); atIdx >= 0 {
+		return IdentScreenName{screenName: i.screenName[:atIdx]}
+	}
+	return i
+}
+
+// IsLocal returns true if the screen name has no network suffix, or if the
+// network suffix matches the given local network name.
+func (i IdentScreenName) IsLocal(localNetwork string) bool {
+	network := i.Network()
+	return network == "" || strings.EqualFold(network, localNetwork)
+}
+
+// NewFederatedIdentScreenName creates a federated screen name by combining a
+// local screen name with a network name (e.g., "user" + "retra.im" =
+// "user@retra.im").
+func NewFederatedIdentScreenName(localPart IdentScreenName, network string) IdentScreenName {
+	if network == "" {
+		return localPart
+	}
+	return IdentScreenName{screenName: localPart.String() + "@" + strings.ToLower(network)}
 }
 
 // DisplayScreenName type represents the screen name in the user-defined format.
