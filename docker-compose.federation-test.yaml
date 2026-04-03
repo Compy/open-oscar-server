@@ -1,0 +1,140 @@
+# Federation Test Harness
+#
+# Spins up a 4-server federation mesh to test gossip propagation and
+# multi-hop message forwarding.
+#
+# Topology:
+#
+#   server-a ---- server-b ---- server-c ---- server-d
+#
+# server-a and server-d have NO direct peering — messages between them
+# must transit through server-b and server-c via FedForward.
+#
+# Usage:
+#   docker compose -f docker-compose.federation-test.yaml up --build
+#
+# Then connect AIM clients to:
+#   server-a  ->  localhost:5190
+#   server-b  ->  localhost:5191
+#   server-c  ->  localhost:5192
+#   server-d  ->  localhost:5193
+#
+# Test scenario:
+#   1. Sign in as "alice" on server-a, "dave" on server-d
+#   2. Add "dave@server-d" to Alice's buddy list
+#   3. Observe gossip convergence in logs (~6 seconds)
+#   4. Dave should appear online for Alice (presence forwarded a->b->c->d)
+#   5. Send a message from Alice to dave@server-d — arrives via multi-hop
+#
+# Management APIs:
+#   server-a  ->  http://localhost:8081
+#   server-b  ->  http://localhost:8082
+#   server-c  ->  http://localhost:8083
+#   server-d  ->  http://localhost:8084
+
+services:
+  server-a:
+    build: .
+    container_name: fed-server-a
+    ports:
+      - "5190:5190"
+      - "8081:8080"
+    environment:
+      OSCAR_LISTENERS: "LOCAL://0.0.0.0:5190"
+      OSCAR_ADVERTISED_LISTENERS_PLAIN: "LOCAL://127.0.0.1:5190"
+      TOC_LISTENERS: "0.0.0.0:9898"
+      API_LISTENER: "0.0.0.0:8080"
+      DB_PATH: "/data/oscar.sqlite"
+      DISABLE_AUTH: "true"
+      LOG_LEVEL: "debug"
+      FEDERATION_NETWORK_NAME: "server-a"
+      FEDERATION_LISTENER: "0.0.0.0:5195"
+      FEDERATION_PEERS: "server-b@fed-server-b:5195:secret-ab"
+      FEDERATION_GOSSIP_INTERVAL: "2"
+      FEDERATION_MAX_TTL: "10"
+    volumes:
+      - server-a-data:/data
+    networks:
+      - federation
+
+  server-b:
+    build: .
+    container_name: fed-server-b
+    ports:
+      - "5191:5190"
+      - "8082:8080"
+    environment:
+      OSCAR_LISTENERS: "LOCAL://0.0.0.0:5190"
+      OSCAR_ADVERTISED_LISTENERS_PLAIN: "LOCAL://127.0.0.1:5191"
+      TOC_LISTENERS: "0.0.0.0:9898"
+      API_LISTENER: "0.0.0.0:8080"
+      DB_PATH: "/data/oscar.sqlite"
+      DISABLE_AUTH: "true"
+      LOG_LEVEL: "debug"
+      FEDERATION_NETWORK_NAME: "server-b"
+      FEDERATION_LISTENER: "0.0.0.0:5195"
+      FEDERATION_PEERS: "server-a@fed-server-a:5195:secret-ab,server-c@fed-server-c:5195:secret-bc"
+      FEDERATION_GOSSIP_INTERVAL: "2"
+      FEDERATION_MAX_TTL: "10"
+    volumes:
+      - server-b-data:/data
+    networks:
+      - federation
+
+  server-c:
+    build: .
+    container_name: fed-server-c
+    ports:
+      - "5192:5190"
+      - "8083:8080"
+    environment:
+      OSCAR_LISTENERS: "LOCAL://0.0.0.0:5190"
+      OSCAR_ADVERTISED_LISTENERS_PLAIN: "LOCAL://127.0.0.1:5192"
+      TOC_LISTENERS: "0.0.0.0:9898"
+      API_LISTENER: "0.0.0.0:8080"
+      DB_PATH: "/data/oscar.sqlite"
+      DISABLE_AUTH: "true"
+      LOG_LEVEL: "debug"
+      FEDERATION_NETWORK_NAME: "server-c"
+      FEDERATION_LISTENER: "0.0.0.0:5195"
+      FEDERATION_PEERS: "server-b@fed-server-b:5195:secret-bc,server-d@fed-server-d:5195:secret-cd"
+      FEDERATION_GOSSIP_INTERVAL: "2"
+      FEDERATION_MAX_TTL: "10"
+    volumes:
+      - server-c-data:/data
+    networks:
+      - federation
+
+  server-d:
+    build: .
+    container_name: fed-server-d
+    ports:
+      - "5193:5190"
+      - "8084:8080"
+    environment:
+      OSCAR_LISTENERS: "LOCAL://0.0.0.0:5190"
+      OSCAR_ADVERTISED_LISTENERS_PLAIN: "LOCAL://127.0.0.1:5193"
+      TOC_LISTENERS: "0.0.0.0:9898"
+      API_LISTENER: "0.0.0.0:8080"
+      DB_PATH: "/data/oscar.sqlite"
+      DISABLE_AUTH: "true"
+      LOG_LEVEL: "debug"
+      FEDERATION_NETWORK_NAME: "server-d"
+      FEDERATION_LISTENER: "0.0.0.0:5195"
+      FEDERATION_PEERS: "server-c@fed-server-c:5195:secret-cd"
+      FEDERATION_GOSSIP_INTERVAL: "2"
+      FEDERATION_MAX_TTL: "10"
+    volumes:
+      - server-d-data:/data
+    networks:
+      - federation
+
+volumes:
+  server-a-data:
+  server-b-data:
+  server-c-data:
+  server-d-data:
+
+networks:
+  federation:
+    driver: bridge
