@@ -70,6 +70,17 @@ func (f *FederatedBuddyListRegistry) RegisterBuddyList(ctx context.Context, user
 				"local_user", user, "remote_user", buddySN, "err", err)
 		}
 	}
+
+	// Notify federation peers that this user is now online. The sign-on
+	// presence broadcast (BroadcastVisibility) only reaches local users via
+	// AllRelationships, which is a local-only SQL query. Remote peers that
+	// have subscribed to this user's presence via FedPresenceSubscribe are
+	// tracked in the Manager, so we need to notify them separately here.
+	if err := f.transport.NotifyPresenceToSubscribers(ctx, user, true, wire.TLVUserInfo{}); err != nil {
+		f.logger.ErrorContext(ctx, "failed to notify federation peers of sign-on",
+			"screen_name", user, "err", err)
+	}
+
 	return nil
 }
 

@@ -37,6 +37,11 @@ func TestFederatedBuddyListRegistry_RegisterBuddyList(t *testing.T) {
 	assert.Equal(t, user, transport.subscribedPresence[0].localUser)
 	assert.Equal(t, state.NewIdentScreenName("remotebuddy@chivanet"), transport.subscribedPresence[0].remoteUser)
 	assert.Equal(t, state.NewIdentScreenName("anotherremote@retra"), transport.subscribedPresence[1].remoteUser)
+
+	// Should notify federation peers that this user is now online
+	assert.Len(t, transport.presenceNotifications, 1)
+	assert.Equal(t, user, transport.presenceNotifications[0].localUser)
+	assert.True(t, transport.presenceNotifications[0].online)
 }
 
 func TestFederatedBuddyListRegistry_UnregisterBuddyList(t *testing.T) {
