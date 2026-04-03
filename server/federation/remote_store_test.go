@@ -29,7 +29,7 @@ func TestRemoteSessionStore_PresenceArrived_NewUser(t *testing.T) {
 
 	assert.NotNil(t, sess)
 	assert.Equal(t, sn, sess.IdentScreenName())
-	assert.Equal(t, state.DisplayScreenName("cooluser"), sess.DisplayScreenName())
+	assert.Equal(t, state.DisplayScreenName("cooluser@chivanet"), sess.DisplayScreenName())
 	assert.True(t, sess.HasLiveInstances())
 
 	// Verify retrievable via Get
@@ -105,7 +105,7 @@ func TestRemoteSessionStore_TLVUserInfo(t *testing.T) {
 	sess := store.PresenceArrived(sn, tlvBlock)
 
 	userInfo := sess.TLVUserInfo()
-	assert.Equal(t, "cooluser", userInfo.ScreenName)
+	assert.Equal(t, "cooluser@chivanet", userInfo.ScreenName)
 	assert.Equal(t, uint16(0), userInfo.WarningLevel)
 }
 

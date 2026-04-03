@@ -41,7 +41,7 @@ func (s *RemoteSessionStore) PresenceArrived(screenName state.IdentScreenName, t
 	if !exists {
 		sess = state.NewSession()
 		sess.SetIdentScreenName(screenName)
-		sess.SetDisplayScreenName(state.DisplayScreenName(screenName.LocalPart().String()))
+		sess.SetDisplayScreenName(state.DisplayScreenName(screenName.String()))
 		sess.SetSignonTime(time.Now())
 
 		instance := sess.AddInstance()
