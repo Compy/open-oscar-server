@@ -154,7 +154,7 @@ func (c *Container) SetupFederation() error {
 	c.sessionRetriever = federation.NewFederatedSessionRetriever(
 		c.inMemorySessionManager, remoteStore, c.cfg.FederationNetworkName)
 	c.relationshipFetcher = federation.NewFederatedRelationshipFetcher(
-		c.sqLiteUserStore, c.cfg.FederationNetworkName)
+		c.sqLiteUserStore, c.sqLiteUserStore, c.cfg.FederationNetworkName, logger)
 	c.feedbagManager = federation.NewFederatedFeedbagManager(
 		c.sqLiteUserStore, c.fedManager, c.cfg.FederationNetworkName, logger)
 	c.profileManager = federation.NewFederatedProfileManager(
