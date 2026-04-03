@@ -204,6 +204,12 @@ func (s LocateService) UserInfoQuery(ctx context.Context, instance *state.Sessio
 		if instance.IdentScreenName() == lookupSN {
 			prof = instance.Profile()
 		}
+		// fall back to server-side profile if session profile is empty
+		if prof.IsEmpty() {
+			if stored, err := s.profileManager.Profile(ctx, lookupSN); err == nil {
+				prof = stored
+			}
+		}
 		list.AppendList([]wire.TLV{
 			wire.NewTLVBE(wire.LocateTLVTagsInfoSigMime, prof.MIMEType),
 			wire.NewTLVBE(wire.LocateTLVTagsInfoSigData, prof.ProfileText),
