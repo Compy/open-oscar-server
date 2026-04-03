@@ -128,7 +128,8 @@ func (m *Manager) LocalNetwork() string {
 //
 
 // RouteToRemote inspects the SNAC message type and routes it to the
-// appropriate federation peer.
+// appropriate federation peer. It translates OSCAR SNACs into the
+// federation wire format before sending.
 func (m *Manager) RouteToRemote(ctx context.Context, recipient state.IdentScreenName, msg wire.SNACMessage) error {
 	network := recipient.Network()
 	if network == "" {
@@ -141,16 +142,75 @@ func (m *Manager) RouteToRemote(ctx context.Context, recipient state.IdentScreen
 	}
 
 	switch {
+	case msg.Frame.FoodGroup == wire.ICBM && msg.Frame.SubGroup == wire.ICBMChannelMsgToClient:
+		return m.routeICBMMessage(pc, recipient, msg)
+	case msg.Frame.FoodGroup == wire.ICBM && msg.Frame.SubGroup == wire.ICBMClientEvent:
+		return m.routeTypingEvent(pc, recipient, msg)
 	case msg.Frame.FoodGroup == wire.Buddy && msg.Frame.SubGroup == wire.BuddyArrived:
 		return m.sendPresenceNotify(pc, recipient, true)
 	case msg.Frame.FoodGroup == wire.Buddy && msg.Frame.SubGroup == wire.BuddyDeparted:
 		return m.sendPresenceNotify(pc, recipient, false)
 	default:
-		// Forward the raw SNAC to the peer — this handles ICBM messages,
-		// typing events, and any other SNAC types relayed through the
-		// message relayer.
-		return m.trySend(pc, msg)
+		m.logger.Warn("RouteToRemote: unhandled SNAC type, dropping",
+			"recipient", recipient,
+			"foodgroup", wire.FoodGroupName(msg.Frame.FoodGroup),
+			"subgroup", wire.SubGroupName(msg.Frame.FoodGroup, msg.Frame.SubGroup),
+		)
+		return nil
 	}
+}
+
+// routeICBMMessage translates an ICBMChannelMsgToClient SNAC into a
+// FedMessage and sends it to the peer.
+func (m *Manager) routeICBMMessage(pc *PeerConnection, recipient state.IdentScreenName, msg wire.SNACMessage) error {
+	body, ok := msg.Body.(wire.SNAC_0x04_0x07_ICBMChannelMsgToClient)
+	if !ok {
+		return fmt.Errorf("unexpected body type for ICBMChannelMsgToClient: %T", msg.Body)
+	}
+
+	fedMsg := wire.SNAC_0x0100_0x0004_FedMessage{
+		Cookie:    body.Cookie,
+		FromUser:  body.TLVUserInfo.ScreenName, // sender's display name
+		ToUser:    recipient.LocalPart().String(),
+		ChannelID: body.ChannelID,
+	}
+	for _, tlv := range body.TLVRestBlock.TLVList {
+		if tlv.Tag == wire.ICBMTLVRequestHostAck {
+			continue // don't forward ack requests across federation
+		}
+		fedMsg.Append(tlv)
+	}
+
+	return m.trySend(pc, wire.SNACMessage{
+		Frame: wire.SNACFrame{
+			FoodGroup: wire.Federation,
+			SubGroup:  wire.FedMessage,
+		},
+		Body: fedMsg,
+	})
+}
+
+// routeTypingEvent translates an ICBMClientEvent SNAC into a FedTypingEvent
+// and sends it to the peer.
+func (m *Manager) routeTypingEvent(pc *PeerConnection, recipient state.IdentScreenName, msg wire.SNACMessage) error {
+	body, ok := msg.Body.(wire.SNAC_0x04_0x14_ICBMClientEvent)
+	if !ok {
+		return fmt.Errorf("unexpected body type for ICBMClientEvent: %T", msg.Body)
+	}
+
+	return m.trySend(pc, wire.SNACMessage{
+		Frame: wire.SNACFrame{
+			FoodGroup: wire.Federation,
+			SubGroup:  wire.FedTypingEvent,
+		},
+		Body: wire.SNAC_0x0100_0x000A_FedTypingEvent{
+			Cookie:    body.Cookie,
+			FromUser:  body.ScreenName, // sender's display name (set by handler)
+			ToUser:    recipient.LocalPart().String(),
+			ChannelID: body.ChannelID,
+			Event:     body.Event,
+		},
+	})
 }
 
 func (m *Manager) sendPresenceNotify(pc *PeerConnection, recipient state.IdentScreenName, online bool) error {
