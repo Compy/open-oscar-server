@@ -26,14 +26,16 @@ func NewLocateService(
 	relationshipFetcher RelationshipFetcher,
 	sessionRetriever SessionRetriever,
 	userManager UserManager,
+	sessionUpdateNotifier SessionUpdateNotifier,
 ) LocateService {
 	return LocateService{
-		buddyBroadcaster:    newBuddyNotifier(bartItemManager, relationshipFetcher, messageRelayer, sessionRetriever),
-		messageRelayer:      messageRelayer,
-		relationshipFetcher: relationshipFetcher,
-		profileManager:      profileManager,
-		sessionRetriever:    sessionRetriever,
-		userManager:         userManager,
+		buddyBroadcaster:      newBuddyNotifier(bartItemManager, relationshipFetcher, messageRelayer, sessionRetriever),
+		messageRelayer:        messageRelayer,
+		relationshipFetcher:   relationshipFetcher,
+		profileManager:        profileManager,
+		sessionRetriever:      sessionRetriever,
+		userManager:           userManager,
+		sessionUpdateNotifier: sessionUpdateNotifier,
 	}
 }
 
@@ -41,12 +43,13 @@ func NewLocateService(
 // responsible for user profiles, user info lookups, directory information, and
 // keyword lookups.
 type LocateService struct {
-	buddyBroadcaster    buddyBroadcaster
-	messageRelayer      MessageRelayer
-	relationshipFetcher RelationshipFetcher
-	profileManager      ProfileManager
-	sessionRetriever    SessionRetriever
-	userManager         UserManager
+	buddyBroadcaster      buddyBroadcaster
+	messageRelayer        MessageRelayer
+	relationshipFetcher   RelationshipFetcher
+	profileManager        ProfileManager
+	sessionRetriever      SessionRetriever
+	userManager           UserManager
+	sessionUpdateNotifier SessionUpdateNotifier
 }
 
 // RightsQuery returns SNAC wire.LocateRightsReply, which contains Locate food
@@ -150,6 +153,13 @@ func (s LocateService) SetInfo(ctx context.Context, instance *state.SessionInsta
 			if err := s.buddyBroadcaster.BroadcastBuddyArrived(ctx, instance.IdentScreenName(), instance.Session().TLVUserInfo()); err != nil {
 				return err
 			}
+		}
+	}
+
+	// Notify federation peers of session data changes.
+	if s.sessionUpdateNotifier != nil && instance.SignonComplete() {
+		if err := s.sessionUpdateNotifier.NotifySessionUpdate(ctx, instance.IdentScreenName()); err != nil {
+			return err
 		}
 	}
 

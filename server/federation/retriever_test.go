@@ -1,6 +1,7 @@
 package federation
 
 import (
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -27,7 +28,7 @@ func TestFederatedSessionRetriever_LocalUser(t *testing.T) {
 			state.NewIdentScreenName("localuser"): localSess,
 		},
 	}
-	remoteStore := NewRemoteSessionStore()
+	remoteStore := NewRemoteSessionStore(slog.Default())
 
 	retriever := NewFederatedSessionRetriever(local, remoteStore, "mynet")
 
@@ -46,7 +47,7 @@ func TestFederatedSessionRetriever_LocalUserWithMatchingNetwork(t *testing.T) {
 			sn: localSess,
 		},
 	}
-	remoteStore := NewRemoteSessionStore()
+	remoteStore := NewRemoteSessionStore(slog.Default())
 
 	retriever := NewFederatedSessionRetriever(local, remoteStore, "mynet")
 
@@ -59,7 +60,7 @@ func TestFederatedSessionRetriever_RemoteUser(t *testing.T) {
 	local := &mockSessionRetriever{
 		sessions: map[state.IdentScreenName]*state.Session{},
 	}
-	remoteStore := NewRemoteSessionStore()
+	remoteStore := NewRemoteSessionStore(slog.Default())
 
 	remoteSN := state.NewIdentScreenName("remoteuser@chivanet")
 	remoteStore.PresenceArrived(remoteSN, wire.TLVRestBlock{})
@@ -75,7 +76,7 @@ func TestFederatedSessionRetriever_RemoteUserNotFound(t *testing.T) {
 	local := &mockSessionRetriever{
 		sessions: map[state.IdentScreenName]*state.Session{},
 	}
-	remoteStore := NewRemoteSessionStore()
+	remoteStore := NewRemoteSessionStore(slog.Default())
 
 	retriever := NewFederatedSessionRetriever(local, remoteStore, "mynet")
 
@@ -87,7 +88,7 @@ func TestFederatedSessionRetriever_LocalUserNotFound(t *testing.T) {
 	local := &mockSessionRetriever{
 		sessions: map[state.IdentScreenName]*state.Session{},
 	}
-	remoteStore := NewRemoteSessionStore()
+	remoteStore := NewRemoteSessionStore(slog.Default())
 
 	retriever := NewFederatedSessionRetriever(local, remoteStore, "mynet")
 

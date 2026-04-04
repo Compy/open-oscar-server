@@ -50,8 +50,9 @@ type Container struct {
 	profileManager      foodgroup.ProfileManager
 
 	// Federation (nil when federation is disabled)
-	fedManager *federation.Manager
-	fedServer  *federation.Server
+	fedManager            *federation.Manager
+	fedServer             *federation.Server
+	sessionUpdateNotifier foodgroup.SessionUpdateNotifier
 }
 
 // MakeCommonDeps creates common dependencies used by the food group services.
@@ -134,7 +135,7 @@ func (c *Container) SetupFederation() error {
 	}
 
 	logger := c.logger.With("svc", "federation")
-	remoteStore := federation.NewRemoteSessionStore()
+	remoteStore := federation.NewRemoteSessionStore(logger)
 
 	c.fedManager = federation.NewManager(
 		c.cfg.FederationNetworkName,
@@ -159,6 +160,8 @@ func (c *Container) SetupFederation() error {
 		c.sqLiteUserStore, c.fedManager, c.cfg.FederationNetworkName, logger)
 	c.profileManager = federation.NewFederatedProfileManager(
 		c.sqLiteUserStore, c.fedManager, remoteStore, c.cfg.FederationNetworkName, logger)
+
+	c.sessionUpdateNotifier = c.fedManager
 
 	// Rebuild ICBM service with wrapped interfaces
 	c.icbmSvc = foodgroup.NewICBMService(
@@ -376,6 +379,7 @@ func OSCAR(deps Container) *oscar.Server {
 		deps.relationshipFetcher,
 		deps.sessionRetriever,
 		deps.sqLiteUserStore,
+		deps.sessionUpdateNotifier,
 	)
 	oServiceService := foodgroup.NewOServiceService(
 		deps.cfg,
@@ -390,6 +394,7 @@ func OSCAR(deps Container) *oscar.Server {
 		deps.chatSessionManager,
 		deps.profileManager,
 		deps.sqLiteUserStore,
+		deps.sessionUpdateNotifier,
 	)
 	userLookupService := foodgroup.NewUserLookupService(deps.sqLiteUserStore)
 	statsService := foodgroup.NewStatsService()
@@ -553,6 +558,7 @@ func TOC(deps Container) *toc.Server {
 				deps.relationshipFetcher,
 				deps.sessionRetriever,
 				deps.sqLiteUserStore,
+				deps.sessionUpdateNotifier,
 			),
 			Logger: logger,
 			OServiceService: foodgroup.NewOServiceService(
@@ -568,6 +574,7 @@ func TOC(deps Container) *toc.Server {
 				deps.chatSessionManager,
 				deps.profileManager,
 				deps.sqLiteUserStore,
+				deps.sessionUpdateNotifier,
 			),
 			PermitDenyService: foodgroup.NewPermitDenyService(
 				deps.sqLiteUserStore,
@@ -665,6 +672,7 @@ func WebAPI(deps Container) *webapi.Server {
 			deps.relationshipFetcher,
 			deps.sessionRetriever,
 			deps.sqLiteUserStore,
+			deps.sessionUpdateNotifier,
 		),
 		Logger: logger,
 		OServiceService: foodgroup.NewOServiceService(
@@ -680,6 +688,7 @@ func WebAPI(deps Container) *webapi.Server {
 			deps.chatSessionManager,
 			deps.profileManager,
 			deps.sqLiteUserStore,
+			deps.sessionUpdateNotifier,
 		),
 		PermitDenyService: foodgroup.NewPermitDenyService(
 			deps.sqLiteUserStore,

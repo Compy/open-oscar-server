@@ -29,6 +29,10 @@ const (
 	FedUserInfoReply        uint16 = 0x000E
 	FedEvilRequest          uint16 = 0x000F
 	FedEvilReply            uint16 = 0x0010
+	FedSessionSyncBegin     uint16 = 0x0011
+	FedSessionSync          uint16 = 0x0012
+	FedSessionSyncEnd       uint16 = 0x0013
+	FedSessionUpdate        uint16 = 0x0014
 )
 
 //
@@ -41,6 +45,14 @@ const (
 	FedTLVDigest      uint16 = 0x0003
 	FedTLVVersion     uint16 = 0x0004
 	FedTLVErrorCode   uint16 = 0x0005
+	FedTLVProfileText uint16 = 0x0010
+	FedTLVProfileMIME uint16 = 0x0011
+	FedTLVAwayMessage uint16 = 0x0012
+	FedTLVAwayMIME    uint16 = 0x0013
+	FedTLVWarningLevel uint16 = 0x0014
+	FedTLVIdleSeconds  uint16 = 0x0015
+	FedTLVBuddyIconInfo uint16 = 0x0016
+	FedTLVSignonTime   uint16 = 0x0017
 )
 
 //
@@ -176,4 +188,29 @@ type SNAC_0x0100_0x0010_FedEvilReply struct {
 	EvilDeltaApplied uint16
 	UpdatedEvilValue uint16
 	ErrorCode        uint16 // 0 = success
+}
+
+// SNAC_0x0100_0x0011_FedSessionSyncBegin signals the start of a bulk session
+// sync. Sent when a peer connects so the receiving server knows to expect a
+// stream of FedSessionSync messages.
+type SNAC_0x0100_0x0011_FedSessionSyncBegin struct{}
+
+// SNAC_0x0100_0x0012_FedSessionSync carries the full session data for a single
+// user during bulk sync. The TLVRestBlock contains session fields as TLVs
+// (profile, away message, warning, idle, flags, status, caps, signon time).
+type SNAC_0x0100_0x0012_FedSessionSync struct {
+	ScreenName string `oscar:"len_prefix=uint8"`
+	TLVRestBlock
+}
+
+// SNAC_0x0100_0x0013_FedSessionSyncEnd signals the end of a bulk session sync.
+type SNAC_0x0100_0x0013_FedSessionSyncEnd struct{}
+
+// SNAC_0x0100_0x0014_FedSessionUpdate carries an incremental session data
+// update for a single user. Sent whenever a user's session data changes
+// (profile, away message, idle, warning). Uses the same TLV format as
+// FedSessionSync.
+type SNAC_0x0100_0x0014_FedSessionUpdate struct {
+	ScreenName string `oscar:"len_prefix=uint8"`
+	TLVRestBlock
 }

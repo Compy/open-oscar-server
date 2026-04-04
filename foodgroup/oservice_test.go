@@ -826,7 +826,7 @@ func TestOServiceService_ServiceRequest(t *testing.T) {
 			//
 			// send input SNAC
 			//
-			svc := NewOServiceService(config.Config{}, nil, slog.Default(), cookieIssuer, chatRoomManager, nil, nil, nil, wire.DefaultSNACRateLimits(), chatMessageRelayer, nil, nil)
+			svc := NewOServiceService(config.Config{}, nil, slog.Default(), cookieIssuer, chatRoomManager, nil, nil, nil, wire.DefaultSNACRateLimits(), chatMessageRelayer, nil, nil, nil)
 
 			outputSNAC, err := svc.ServiceRequest(context.Background(), tc.service, tc.instance, tc.inputSNAC.Frame,
 				tc.inputSNAC.Body.(wire.SNAC_0x01_0x04_OServiceServiceRequest), tc.listener)
@@ -1775,7 +1775,7 @@ func TestOServiceService_HostOnline(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			svc := NewOServiceService(config.Config{}, nil, slog.Default(), nil, nil, nil, nil, nil, wire.DefaultSNACRateLimits(), nil, nil, nil)
+			svc := NewOServiceService(config.Config{}, nil, slog.Default(), nil, nil, nil, nil, nil, wire.DefaultSNACRateLimits(), nil, nil, nil, nil)
 			have := svc.HostOnline(tc.service)
 			assert.Equal(t, tc.expectOutput, have)
 		})
@@ -2738,7 +2738,7 @@ func TestOServiceService_ClientOnline(t *testing.T) {
 					Return(params.err)
 			}
 
-			svc := NewOServiceService(tt.cfg, messageRelayer, slog.Default(), nil, chatRoomManager, nil, nil, nil, wire.DefaultSNACRateLimits(), chatMessageRelayer, profileManager, offlineMessageManager)
+			svc := NewOServiceService(tt.cfg, messageRelayer, slog.Default(), nil, chatRoomManager, nil, nil, nil, wire.DefaultSNACRateLimits(), chatMessageRelayer, profileManager, offlineMessageManager, nil)
 			svc.buddyBroadcaster = buddyUpdateBroadcaster
 			haveErr := svc.ClientOnline(context.Background(), tt.service, tt.bodyIn, tt.instance)
 			assert.ErrorIs(t, haveErr, tt.wantErr)

@@ -28,6 +28,7 @@ type OServiceService struct {
 	chatMessageRelayer    ChatMessageRelayer
 	profileManager        ProfileManager
 	offlineMessageManager OfflineMessageManager
+	sessionUpdateNotifier SessionUpdateNotifier
 }
 
 // NewOServiceService creates a new instance of NewOServiceService.
@@ -44,6 +45,7 @@ func NewOServiceService(
 	chatMessageRelayer ChatMessageRelayer,
 	profileManager ProfileManager,
 	offlineMessageManager OfflineMessageManager,
+	sessionUpdateNotifier SessionUpdateNotifier,
 ) *OServiceService {
 	return &OServiceService{
 		cookieIssuer:          cookieIssuer,
@@ -57,6 +59,7 @@ func NewOServiceService(
 		chatMessageRelayer:    chatMessageRelayer,
 		profileManager:        profileManager,
 		offlineMessageManager: offlineMessageManager,
+		sessionUpdateNotifier: sessionUpdateNotifier,
 	}
 }
 
@@ -287,7 +290,13 @@ func (s OServiceService) IdleNotification(ctx context.Context, instance *state.S
 	} else {
 		instance.SetIdle(time.Duration(inBody.IdleTime) * time.Second)
 	}
-	return s.buddyBroadcaster.BroadcastBuddyArrived(ctx, instance.IdentScreenName(), instance.Session().TLVUserInfo())
+	if err := s.buddyBroadcaster.BroadcastBuddyArrived(ctx, instance.IdentScreenName(), instance.Session().TLVUserInfo()); err != nil {
+		return err
+	}
+	if s.sessionUpdateNotifier != nil {
+		return s.sessionUpdateNotifier.NotifySessionUpdate(ctx, instance.IdentScreenName())
+	}
+	return nil
 }
 
 // SetPrivacyFlags sets client privacy settings. Currently, there's no action
@@ -681,6 +690,14 @@ func (s OServiceService) ClientOnline(ctx context.Context, service uint16, inBod
 	case wire.BOS:
 		if err := s.buddyBroadcaster.BroadcastVisibility(ctx, instance, nil, false); err != nil {
 			return fmt.Errorf("unable to send buddy arrival notification: %w", err)
+		}
+		// Deliver any cached federated buddy presence that may have arrived
+		// before sign-on completed. This closes the race window between
+		// FedPresenceSubscribeAck delivery and BroadcastVisibility.
+		if s.sessionUpdateNotifier != nil {
+			if err := s.sessionUpdateNotifier.DeliverFederatedBuddyPresence(ctx, instance.IdentScreenName()); err != nil {
+				return fmt.Errorf("unable to deliver federated buddy presence: %w", err)
+			}
 		}
 
 		msg := wire.SNACMessage{

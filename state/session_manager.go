@@ -89,6 +89,7 @@ func (s *InMemorySessionManager) unlockUser(sn IdentScreenName) {
 
 // RelayToAll relays a message to all sessions in the session pool.
 func (s *InMemorySessionManager) RelayToAll(ctx context.Context, msg wire.SNACMessage) {
+	s.logger.DebugContext(ctx, "InMemorySessionManager::RelayToAll relaying message to all sessions", "message", msg)
 	s.mapMutex.RLock()
 	defer s.mapMutex.RUnlock()
 	for _, rec := range s.store {
@@ -98,6 +99,7 @@ func (s *InMemorySessionManager) RelayToAll(ctx context.Context, msg wire.SNACMe
 
 // RelayToScreenName relays a message to a session with a matching screen name.
 func (s *InMemorySessionManager) RelayToScreenName(ctx context.Context, screenName IdentScreenName, msg wire.SNACMessage) {
+	s.logger.DebugContext(ctx, "InMemorySessionManager::RelayToScreenName relaying message to screen name", "recipient", screenName, "message", msg)
 	sess := s.RetrieveSession(screenName)
 	if sess == nil {
 		s.logger.WarnContext(ctx, "can't send notification because user is not online", "recipient", screenName, "message", msg)
@@ -108,12 +110,14 @@ func (s *InMemorySessionManager) RelayToScreenName(ctx context.Context, screenNa
 
 // RelayToScreenNames relays a message to sessions with matching screenNames.
 func (s *InMemorySessionManager) RelayToScreenNames(ctx context.Context, screenNames []IdentScreenName, msg wire.SNACMessage) {
+	s.logger.DebugContext(ctx, "InMemorySessionManager::RelayToScreenNames relaying message to screen names", "recipients", screenNames, "message", msg)
 	for _, sess := range s.retrieveByScreenNames(screenNames) {
 		s.maybeRelayMessage(ctx, msg, sess)
 	}
 }
 
 func (s *InMemorySessionManager) RelayToSelf(ctx context.Context, instance *SessionInstance, msg wire.SNACMessage) {
+	s.logger.DebugContext(ctx, "InMemorySessionManager::RelayToSelf relaying message to self", "recipient", instance.IdentScreenName(), "message", msg)
 	switch instance.RelayMessageToInstance(msg) {
 	case SessSendClosed:
 		s.logger.WarnContext(ctx, "can't send notification because the user's session is closed", "recipient", instance.IdentScreenName(), "message", msg)
@@ -124,6 +128,7 @@ func (s *InMemorySessionManager) RelayToSelf(ctx context.Context, instance *Sess
 }
 
 func (s *InMemorySessionManager) RelayToOtherInstances(ctx context.Context, instance *SessionInstance, msg wire.SNACMessage) {
+	s.logger.DebugContext(ctx, "InMemorySessionManager::RelayToOtherInstances relaying message to other instances", "recipient", instance.IdentScreenName(), "message", msg)
 	for _, inst := range instance.Session().Instances() {
 		if instance == inst || !inst.live() {
 			continue
@@ -139,6 +144,7 @@ func (s *InMemorySessionManager) RelayToOtherInstances(ctx context.Context, inst
 }
 
 func (s *InMemorySessionManager) RelayToScreenNameActiveOnly(ctx context.Context, screenName IdentScreenName, msg wire.SNACMessage) {
+	s.logger.DebugContext(ctx, "InMemorySessionManager::RelayToScreenNameActiveOnly relaying message to screen name active only", "recipient", screenName, "message", msg)
 	sess := s.RetrieveSession(screenName)
 	if sess == nil {
 		s.logger.WarnContext(ctx, "can't send notification because user is not online", "recipient", screenName, "message", msg)
@@ -148,6 +154,7 @@ func (s *InMemorySessionManager) RelayToScreenNameActiveOnly(ctx context.Context
 }
 
 func (s *InMemorySessionManager) maybeRelayMessage(ctx context.Context, msg wire.SNACMessage, sess *Session) {
+	s.logger.DebugContext(ctx, "InMemorySessionManager::maybeRelayMessage relaying message to session", "recipient", sess.IdentScreenName(), "message", msg)
 	for _, instance := range sess.Instances() {
 		if !instance.live() {
 			continue
@@ -163,6 +170,7 @@ func (s *InMemorySessionManager) maybeRelayMessage(ctx context.Context, msg wire
 }
 
 func (s *InMemorySessionManager) maybeRelayMessageActiveOnly(ctx context.Context, msg wire.SNACMessage, sess *Session) {
+	s.logger.DebugContext(ctx, "InMemorySessionManager::maybeRelayMessageActiveOnly relaying message to session active only", "recipient", sess.IdentScreenName(), "message", msg)
 	for _, instance := range sess.Instances() {
 		if !instance.active() {
 			continue
@@ -178,6 +186,7 @@ func (s *InMemorySessionManager) maybeRelayMessageActiveOnly(ctx context.Context
 }
 
 func (s *InMemorySessionManager) AddSession(ctx context.Context, screenName DisplayScreenName, doMultiSess bool, cfg ...func(sess *Session)) (*SessionInstance, error) {
+	s.logger.DebugContext(ctx, "InMemorySessionManager::AddSession adding session", "screenName", screenName, "doMultiSess", doMultiSess)
 	s.lockUser(screenName.IdentScreenName())
 	defer s.unlockUser(screenName.IdentScreenName())
 
@@ -216,6 +225,7 @@ func (s *InMemorySessionManager) AddSession(ctx context.Context, screenName Disp
 }
 
 func (s *InMemorySessionManager) newSession(screenName DisplayScreenName, doMultiSess bool, cfg []func(sess *Session)) (*SessionInstance, error) {
+	s.logger.Debug("InMemorySessionManager::newSession creating new session", "screenName", screenName, "doMultiSess", doMultiSess)
 	sess := NewSession()
 	sess.SetIdentScreenName(screenName.IdentScreenName())
 	sess.SetDisplayScreenName(screenName)
@@ -239,6 +249,7 @@ func (s *InMemorySessionManager) newSession(screenName DisplayScreenName, doMult
 }
 
 func (s *InMemorySessionManager) findRec(identScreenName IdentScreenName) *sessionSlot {
+	s.logger.Debug("InMemorySessionManager::findRec searching for session", "identScreenName", identScreenName)
 	for _, rec := range s.store {
 		if identScreenName == rec.session.IdentScreenName() {
 			return rec
@@ -249,6 +260,7 @@ func (s *InMemorySessionManager) findRec(identScreenName IdentScreenName) *sessi
 
 // RemoveSession takes a session out of the session pool.
 func (s *InMemorySessionManager) RemoveSession(session *Session) {
+	s.logger.Debug("InMemorySessionManager::RemoveSession removing session", "screenName", session.IdentScreenName())
 	s.mapMutex.Lock()
 	defer s.mapMutex.Unlock()
 	if rec, ok := s.store[session.IdentScreenName()]; ok && rec.session == session {
@@ -260,6 +272,7 @@ func (s *InMemorySessionManager) RemoveSession(session *Session) {
 // RetrieveSession finds a session with a matching screen name. Returns nil if
 // session is not found or if there are no active instances with complete signon.
 func (s *InMemorySessionManager) RetrieveSession(screenName IdentScreenName) *Session {
+	s.logger.Debug("InMemorySessionManager::RetrieveSession retrieving session", "screenName", screenName)
 	s.mapMutex.RLock()
 	defer s.mapMutex.RUnlock()
 	if rec, ok := s.store[screenName]; ok {
@@ -271,6 +284,7 @@ func (s *InMemorySessionManager) RetrieveSession(screenName IdentScreenName) *Se
 }
 
 func (s *InMemorySessionManager) retrieveByScreenNames(screenNames []IdentScreenName) []*Session {
+	s.logger.Debug("InMemorySessionManager::retrieveByScreenNames retrieving sessions", "screenNames", screenNames)
 	s.mapMutex.RLock()
 	defer s.mapMutex.RUnlock()
 	var ret []*Session
@@ -329,6 +343,7 @@ type InMemoryChatSessionManager struct {
 // setup (for example shutdown behavior) while the session is still being
 // created.
 func (s *InMemoryChatSessionManager) AddSession(ctx context.Context, chatCookie string, screenName DisplayScreenName, cfg ...func(sess *Session)) (*SessionInstance, error) {
+	s.logger.DebugContext(ctx, "InMemoryChatSessionManager::AddSession adding session to chat room", "chatCookie", chatCookie, "screenName", screenName)
 	s.mapMutex.Lock()
 	if _, ok := s.store[chatCookie]; !ok {
 		s.store[chatCookie] = NewInMemorySessionManager(s.logger)
@@ -369,6 +384,7 @@ func (s *InMemoryChatSessionManager) AddSession(ctx context.Context, chatCookie 
 // RemoveSession removes a user session from a chat room. It panics if you
 // attempt to remove the session twice.
 func (s *InMemoryChatSessionManager) RemoveSession(sess *Session) {
+	s.logger.Debug("InMemoryChatSessionManager::RemoveSession removing session from chat room", "chatCookie", sess.ChatRoomCookie(), "screenName", sess.IdentScreenName())
 	s.mapMutex.Lock()
 	defer s.mapMutex.Unlock()
 
@@ -385,6 +401,7 @@ func (s *InMemoryChatSessionManager) RemoveSession(sess *Session) {
 
 // RemoveUserFromAllChats removes a user's session from all chat rooms.
 func (s *InMemoryChatSessionManager) RemoveUserFromAllChats(user IdentScreenName) {
+	s.logger.Debug("InMemoryChatSessionManager::RemoveUserFromAllChats removing user from all chat rooms", "screenName", user)
 	var cpy []*InMemorySessionManager
 
 	// make a copy since CloseSession() may call back to InMemoryChatSessionManager
@@ -406,6 +423,7 @@ func (s *InMemoryChatSessionManager) RemoveUserFromAllChats(user IdentScreenName
 // AllSessions returns all chat room participants. Returns
 // ErrChatRoomNotFound if the room does not exist.
 func (s *InMemoryChatSessionManager) AllSessions(cookie string) []*Session {
+	s.logger.Debug("InMemoryChatSessionManager::AllSessions retrieving all sessions for chat room", "chatCookie", cookie)
 	s.mapMutex.RLock()
 	defer s.mapMutex.RUnlock()
 
@@ -421,6 +439,7 @@ func (s *InMemoryChatSessionManager) AllSessions(cookie string) []*Session {
 // the participant with a particular screen name. Returns ErrChatRoomNotFound
 // if the room does not exist for cookie.
 func (s *InMemoryChatSessionManager) RelayToAllExcept(ctx context.Context, cookie string, except IdentScreenName, msg wire.SNACMessage) {
+	s.logger.DebugContext(ctx, "InMemoryChatSessionManager::RelayToAllExcept relaying message to all except one participant in chat room", "chatCookie", cookie, "except", except, "message", msg)
 	s.mapMutex.RLock()
 	defer s.mapMutex.RUnlock()
 
@@ -441,6 +460,7 @@ func (s *InMemoryChatSessionManager) RelayToAllExcept(ctx context.Context, cooki
 // RelayToScreenName sends a message to a chat room user. Returns
 // ErrChatRoomNotFound if the room does not exist for cookie.
 func (s *InMemoryChatSessionManager) RelayToScreenName(ctx context.Context, cookie string, recipient IdentScreenName, msg wire.SNACMessage) {
+	s.logger.DebugContext(ctx, "InMemoryChatSessionManager::RelayToScreenName relaying message to a participant in chat room", "chatCookie", cookie, "recipient", recipient, "message", msg)
 	s.mapMutex.RLock()
 	defer s.mapMutex.RUnlock()
 

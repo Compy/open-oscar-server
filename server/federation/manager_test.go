@@ -30,7 +30,7 @@ func newTestManager(t *testing.T, peerNetwork string) (*Manager, *PeerConnection
 		&mockRelationshipFetcher{},
 		&mockFeedbagManager{},
 		&mockProfileManager{},
-		NewRemoteSessionStore(),
+		NewRemoteSessionStore(slog.Default()),
 		slog.Default(),
 	)
 	// Mark the peer as connected so sends don't fail.

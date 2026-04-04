@@ -105,6 +105,7 @@ func NewSession() *Session {
 // AddInstance creates and adds a new connection instance to the session.
 // Returns the newly created SessionInstance with a unique instance number.
 func (s *Session) AddInstance() *SessionInstance {
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 

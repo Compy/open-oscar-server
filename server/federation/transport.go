@@ -30,4 +30,9 @@ type Transport interface {
 	// requestType is a bitmask of LocateType* constants (uint32 in the wire
 	// spec, but only the low 16 bits are used in the federation protocol).
 	QueryUserInfo(ctx context.Context, remoteUser state.IdentScreenName, requestType uint32) (*wire.SNAC_0x0100_0x000E_FedUserInfoReply, error)
+
+	// NotifySessionUpdate pushes a local user's current session data to all
+	// connected federation peers. Called when session data changes (profile,
+	// away message, idle, warning).
+	NotifySessionUpdate(ctx context.Context, screenName state.IdentScreenName) error
 }

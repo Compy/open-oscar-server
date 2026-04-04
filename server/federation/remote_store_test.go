@@ -1,6 +1,7 @@
 package federation
 
 import (
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -10,7 +11,7 @@ import (
 )
 
 func TestRemoteSessionStore_Get_NotFound(t *testing.T) {
-	store := NewRemoteSessionStore()
+	store := NewRemoteSessionStore(slog.Default())
 	sn := state.NewIdentScreenName("cooluser@chivanet")
 
 	sess := store.Get(sn)
@@ -18,7 +19,7 @@ func TestRemoteSessionStore_Get_NotFound(t *testing.T) {
 }
 
 func TestRemoteSessionStore_PresenceArrived_NewUser(t *testing.T) {
-	store := NewRemoteSessionStore()
+	store := NewRemoteSessionStore(slog.Default())
 	sn := state.NewIdentScreenName("cooluser@chivanet")
 
 	tlvBlock := wire.TLVRestBlock{}
@@ -38,7 +39,7 @@ func TestRemoteSessionStore_PresenceArrived_NewUser(t *testing.T) {
 }
 
 func TestRemoteSessionStore_PresenceArrived_UpdateExisting(t *testing.T) {
-	store := NewRemoteSessionStore()
+	store := NewRemoteSessionStore(slog.Default())
 	sn := state.NewIdentScreenName("cooluser@chivanet")
 
 	tlvBlock1 := wire.TLVRestBlock{}
@@ -56,7 +57,7 @@ func TestRemoteSessionStore_PresenceArrived_UpdateExisting(t *testing.T) {
 }
 
 func TestRemoteSessionStore_PresenceDeparted(t *testing.T) {
-	store := NewRemoteSessionStore()
+	store := NewRemoteSessionStore(slog.Default())
 	sn := state.NewIdentScreenName("cooluser@chivanet")
 
 	tlvBlock := wire.TLVRestBlock{}
@@ -70,7 +71,7 @@ func TestRemoteSessionStore_PresenceDeparted(t *testing.T) {
 }
 
 func TestRemoteSessionStore_PresenceDeparted_NotFound(t *testing.T) {
-	store := NewRemoteSessionStore()
+	store := NewRemoteSessionStore(slog.Default())
 	sn := state.NewIdentScreenName("nobody@chivanet")
 
 	removed := store.PresenceDeparted(sn)
@@ -78,7 +79,7 @@ func TestRemoteSessionStore_PresenceDeparted_NotFound(t *testing.T) {
 }
 
 func TestRemoteSessionStore_PresenceArrived_WithCapabilities(t *testing.T) {
-	store := NewRemoteSessionStore()
+	store := NewRemoteSessionStore(slog.Default())
 	sn := state.NewIdentScreenName("cooluser@chivanet")
 
 	cap1 := [16]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10}
@@ -96,7 +97,7 @@ func TestRemoteSessionStore_PresenceArrived_WithCapabilities(t *testing.T) {
 }
 
 func TestRemoteSessionStore_TLVUserInfo(t *testing.T) {
-	store := NewRemoteSessionStore()
+	store := NewRemoteSessionStore(slog.Default())
 	sn := state.NewIdentScreenName("cooluser@chivanet")
 
 	tlvBlock := wire.TLVRestBlock{}
@@ -110,7 +111,7 @@ func TestRemoteSessionStore_TLVUserInfo(t *testing.T) {
 }
 
 func TestRemoteSessionStore_Subscribers(t *testing.T) {
-	store := NewRemoteSessionStore()
+	store := NewRemoteSessionStore(slog.Default())
 
 	sn1 := state.NewIdentScreenName("user1@chivanet")
 	sn2 := state.NewIdentScreenName("user2@retra")

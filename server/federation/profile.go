@@ -52,7 +52,17 @@ func (f *FederatedProfileManager) Profile(ctx context.Context, screenName state.
 	if screenName.IsLocal(f.localNetwork) {
 		return f.local.Profile(ctx, screenName)
 	}
-	// Query remote server for profile
+	// Check cached session data first (populated by federation session sync).
+	if sess := f.remoteStore.Get(screenName); sess != nil {
+		instances := sess.Instances()
+		if len(instances) > 0 {
+			prof := instances[0].Profile()
+			if prof.ProfileText != "" {
+				return prof, nil
+			}
+		}
+	}
+	// Fall back to on-demand query for remote server profile.
 	reply, err := f.transport.QueryUserInfo(ctx, screenName, wire.LocateTypeSig)
 	if err != nil {
 		f.logger.ErrorContext(ctx, "failed to query federated user profile",

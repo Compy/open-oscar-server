@@ -69,6 +69,10 @@ func (m *mockTransport) QueryUserInfo(_ context.Context, remoteUser state.IdentS
 	return m.queryResult, m.queryErr
 }
 
+func (m *mockTransport) NotifySessionUpdate(_ context.Context, _ state.IdentScreenName) error {
+	return nil
+}
+
 // mockMessageRelayer records calls to the MessageRelayer interface.
 type mockMessageRelayer struct {
 	relayedToScreenName       []relayedMsg

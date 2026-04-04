@@ -381,6 +381,17 @@ type SessionRetriever interface {
 }
 
 // UserManager defines methods for accessing and inserting AIM user records.
+// SessionUpdateNotifier pushes session data changes to federation peers.
+// When federation is disabled, use a no-op implementation.
+type SessionUpdateNotifier interface {
+	NotifySessionUpdate(ctx context.Context, screenName state.IdentScreenName) error
+	// DeliverFederatedBuddyPresence delivers BuddyArrived notifications for
+	// all cached online federated buddies to the given local user. Called
+	// after sign-on completes to ensure federated buddy presence is delivered
+	// even if the subscription ack arrived before the user was fully online.
+	DeliverFederatedBuddyPresence(ctx context.Context, screenName state.IdentScreenName) error
+}
+
 type UserManager interface {
 	// InsertUser inserts a new user into the system. Return state.ErrDupUser
 	// if a user with the same screen name already exists.

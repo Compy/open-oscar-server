@@ -459,7 +459,9 @@ func (m *Manager) connectAndRun(ctx context.Context, pc *PeerConnection) error {
 		"peer", pc.config.NetworkName, "direction", "outbound")
 
 	m.resubscribePresence(peerCtx, pc)
+	m.sendBulkSessionSync(pc)
 	m.runPeerLoops(peerCtx, pc, flapc)
+	m.cleanupPeerDisconnect(ctx, pc)
 	return nil
 }
 
@@ -494,7 +496,9 @@ func (m *Manager) RegisterInboundPeer(ctx context.Context, networkName string, c
 		"peer", networkName, "direction", "inbound")
 
 	m.resubscribePresence(peerCtx, pc)
+	m.sendBulkSessionSync(pc)
 	m.runPeerLoops(peerCtx, pc, flapc)
+	m.cleanupPeerDisconnect(ctx, pc)
 
 	pc.mu.Lock()
 	pc.connected = false
@@ -620,6 +624,14 @@ func (m *Manager) handleInboundSNAC(ctx context.Context, pc *PeerConnection, pay
 		m.handleFedEvilRequest(ctx, pc, buf)
 	case wire.FedEvilReply:
 		m.handleFedEvilReply(buf)
+	case wire.FedSessionSyncBegin:
+		m.logger.Debug("received bulk session sync begin", "peer", pc.config.NetworkName)
+	case wire.FedSessionSync:
+		m.handleFedSessionSync(pc, buf)
+	case wire.FedSessionSyncEnd:
+		m.logger.Debug("received bulk session sync end", "peer", pc.config.NetworkName)
+	case wire.FedSessionUpdate:
+		m.handleFedSessionUpdate(pc, buf)
 	case wire.FedKeepAlive:
 	}
 }
@@ -913,6 +925,53 @@ func (m *Manager) handleFedUserInfoReply(r io.Reader) {
 	}
 }
 
+func (m *Manager) handleFedSessionSync(pc *PeerConnection, r io.Reader) {
+	var msg wire.SNAC_0x0100_0x0012_FedSessionSync
+	if err := wire.UnmarshalBE(&msg, r); err != nil {
+		m.logger.Error("unmarshal FedSessionSync", "err", err)
+		return
+	}
+
+	remoteUser := state.NewFederatedIdentScreenName(
+		state.NewIdentScreenName(msg.ScreenName), pc.config.NetworkName)
+
+	m.logger.Debug("received session sync for remote user",
+		"peer", pc.config.NetworkName,
+		"screen_name", remoteUser,
+		"tlv_count", len(msg.TLVRestBlock.TLVList))
+
+	// Ensure the proxy session exists before updating extended data.
+	m.remoteStore.PresenceArrived(remoteUser, msg.TLVRestBlock)
+	m.remoteStore.UpdateSessionData(remoteUser, msg.TLVRestBlock)
+}
+
+func (m *Manager) handleFedSessionUpdate(pc *PeerConnection, r io.Reader) {
+	var msg wire.SNAC_0x0100_0x0014_FedSessionUpdate
+	if err := wire.UnmarshalBE(&msg, r); err != nil {
+		m.logger.Error("unmarshal FedSessionUpdate", "err", err)
+		return
+	}
+
+	remoteUser := state.NewFederatedIdentScreenName(
+		state.NewIdentScreenName(msg.ScreenName), pc.config.NetworkName)
+
+	exists := m.remoteStore.Get(remoteUser) != nil
+	m.logger.Debug("received session update for remote user",
+		"peer", pc.config.NetworkName,
+		"screen_name", remoteUser,
+		"tlv_count", len(msg.TLVRestBlock.TLVList),
+		"session_exists", exists)
+
+	if !exists {
+		m.logger.Debug("ignoring session update for unknown remote user",
+			"peer", pc.config.NetworkName,
+			"screen_name", remoteUser)
+	}
+
+	// Only update if the session already exists (user is known online).
+	m.remoteStore.UpdateSessionData(remoteUser, msg.TLVRestBlock)
+}
+
 func (m *Manager) handleFedEvilRequest(ctx context.Context, pc *PeerConnection, r io.Reader) {
 	var msg wire.SNAC_0x0100_0x000F_FedEvilRequest
 	if err := wire.UnmarshalBE(&msg, r); err != nil {
@@ -1152,6 +1211,190 @@ func (m *Manager) sendEvilReply(pc *PeerConnection, cookie uint64, delta, update
 		Body: wire.SNAC_0x0100_0x0010_FedEvilReply{
 			Cookie: cookie, EvilDeltaApplied: delta, UpdatedEvilValue: updated, ErrorCode: errCode,
 		},
+	})
+}
+
+// cleanupPeerDisconnect removes all remote sessions for a disconnected peer
+// and notifies local subscribers of the departures.
+func (m *Manager) cleanupPeerDisconnect(ctx context.Context, pc *PeerConnection) {
+	removed := m.remoteStore.ClearNetwork(pc.config.NetworkName)
+	for _, sn := range removed {
+		m.logger.Debug("clearing remote session for disconnected peer",
+			"peer", pc.config.NetworkName,
+			"screen_name", sn)
+		m.deliverPresenceToLocalSubscribers(ctx, sn, false)
+	}
+	m.logger.Info("cleaned up remote sessions for disconnected peer",
+		"peer", pc.config.NetworkName, "removed_count", len(removed))
+}
+
+// NotifySessionUpdate pushes a local user's current session data to all
+// connected federation peers.
+func (m *Manager) NotifySessionUpdate(_ context.Context, screenName state.IdentScreenName) error {
+	sess := m.localRetriever.RetrieveSession(screenName)
+	if sess == nil {
+		m.logger.Debug("session update skipped, session not found",
+			"screen_name", screenName)
+		return nil
+	}
+
+	tlvs := buildSessionSyncTLVs(sess)
+	msg := wire.SNACMessage{
+		Frame: wire.SNACFrame{FoodGroup: wire.Federation, SubGroup: wire.FedSessionUpdate},
+		Body: wire.SNAC_0x0100_0x0014_FedSessionUpdate{
+			ScreenName:   screenName.String(),
+			TLVRestBlock: tlvs,
+		},
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var sentCount int
+	for _, pc := range m.peers {
+		pc.mu.Lock()
+		connected := pc.connected
+		pc.mu.Unlock()
+		if connected {
+			m.trySend(pc, msg)
+			sentCount++
+		}
+	}
+	m.logger.Debug("sent session update to peers",
+		"screen_name", screenName,
+		"tlv_count", len(tlvs.TLVList),
+		"peer_count", sentCount)
+	return nil
+}
+
+// DeliverFederatedBuddyPresence delivers BuddyArrived for all cached online
+// federated buddies to the given local user. This is called after sign-on to
+// close the race window between presence subscription and sign-on completion.
+func (m *Manager) DeliverFederatedBuddyPresence(ctx context.Context, screenName state.IdentScreenName) error {
+	items, err := m.localFeedbag.Feedbag(ctx, screenName)
+	if err != nil {
+		return err
+	}
+
+	for _, item := range items {
+		if item.ClassID != wire.FeedbagClassIdBuddy {
+			continue
+		}
+		buddySN := state.NewIdentScreenName(item.Name)
+		if buddySN.Network() == "" {
+			continue // local buddy
+		}
+		sess := m.remoteStore.Get(buddySN)
+		if sess == nil {
+			continue // not online or not yet known
+		}
+		m.logger.Debug("delivering cached federated buddy presence after sign-on",
+			"local_user", screenName,
+			"remote_buddy", buddySN)
+		m.localRelayer.RelayToScreenName(ctx, screenName, wire.SNACMessage{
+			Frame: wire.SNACFrame{
+				FoodGroup: wire.Buddy,
+				SubGroup:  wire.BuddyArrived,
+				RequestID: wire.ReqIDFromServer,
+			},
+			Body: wire.SNAC_0x03_0x0B_BuddyArrived{
+				TLVUserInfo: sess.TLVUserInfo(),
+			},
+		})
+	}
+	return nil
+}
+
+// buildSessionSyncTLVs builds the TLV block for a local session's full data,
+// suitable for FedSessionSync or FedSessionUpdate messages.
+func buildSessionSyncTLVs(sess *state.Session) wire.TLVRestBlock {
+	var tlvs wire.TLVRestBlock
+
+	instances := sess.Instances()
+	if len(instances) == 0 {
+		return tlvs
+	}
+	inst := instances[0]
+
+	// Profile
+	prof := inst.Profile()
+	if prof.ProfileText != "" {
+		tlvs.Append(wire.NewTLVBE(wire.FedTLVProfileText, prof.ProfileText))
+		tlvs.Append(wire.NewTLVBE(wire.FedTLVProfileMIME, prof.MIMEType))
+	}
+
+	// Away message
+	awayMsg, _ := inst.AwayMessage()
+	if awayMsg != "" {
+		tlvs.Append(wire.NewTLVBE(wire.FedTLVAwayMessage, awayMsg))
+		tlvs.Append(wire.NewTLVBE(wire.FedTLVAwayMIME, `text/aolrtf; charset="us-ascii"`))
+	}
+
+	// Warning level
+	if w := sess.Warning(); w > 0 {
+		tlvs.Append(wire.NewTLVBE(wire.FedTLVWarningLevel, w))
+	}
+
+	// Idle time
+	if inst.Idle() {
+		idleSecs := uint32(time.Since(inst.IdleTime()).Seconds())
+		tlvs.Append(wire.NewTLVBE(wire.FedTLVIdleSeconds, idleSecs))
+	}
+
+	// Signon time
+	tlvs.Append(wire.NewTLVBE(wire.FedTLVSignonTime, uint32(sess.SignonTime().Unix())))
+
+	// Flags, status, caps (same as presence)
+	tlvs.Append(wire.NewTLVBE(wire.OServiceUserInfoUserFlags, inst.UserInfoBitmask()))
+	tlvs.Append(wire.NewTLVBE(wire.OServiceUserInfoStatus, inst.UserStatusBitmask()))
+
+	caps := sess.Caps()
+	if len(caps) > 0 {
+		var capBytes []byte
+		for _, c := range caps {
+			capBytes = append(capBytes, c[:]...)
+		}
+		tlvs.Append(wire.NewTLVBE(wire.OServiceUserInfoOscarCaps, capBytes))
+	}
+
+	return tlvs
+}
+
+// sendBulkSessionSync sends the full session data for all local online users
+// to a peer. Called after peer authentication and presence resubscription.
+func (m *Manager) sendBulkSessionSync(pc *PeerConnection) {
+	m.logger.Debug("starting bulk session sync", "peer", pc.config.NetworkName)
+
+	// Send begin marker
+	m.trySend(pc, wire.SNACMessage{
+		Frame: wire.SNACFrame{FoodGroup: wire.Federation, SubGroup: wire.FedSessionSyncBegin},
+		Body:  wire.SNAC_0x0100_0x0011_FedSessionSyncBegin{},
+	})
+
+	// Send session data for each local online user
+	sessions := m.allSessionRetriever.AllSessions()
+	for _, sess := range sessions {
+		tlvs := buildSessionSyncTLVs(sess)
+		m.logger.Debug("sending session sync for local user",
+			"peer", pc.config.NetworkName,
+			"screen_name", sess.IdentScreenName(),
+			"tlv_count", len(tlvs.TLVList))
+		m.trySend(pc, wire.SNACMessage{
+			Frame: wire.SNACFrame{FoodGroup: wire.Federation, SubGroup: wire.FedSessionSync},
+			Body: wire.SNAC_0x0100_0x0012_FedSessionSync{
+				ScreenName:   sess.IdentScreenName().String(),
+				TLVRestBlock: tlvs,
+			},
+		})
+	}
+
+	m.logger.Debug("completed bulk session sync",
+		"peer", pc.config.NetworkName,
+		"user_count", len(sessions))
+
+	// Send end marker
+	m.trySend(pc, wire.SNACMessage{
+		Frame: wire.SNACFrame{FoodGroup: wire.Federation, SubGroup: wire.FedSessionSyncEnd},
+		Body:  wire.SNAC_0x0100_0x0013_FedSessionSyncEnd{},
 	})
 }
 
